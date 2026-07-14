@@ -1,0 +1,3 @@
+[submodule "radicle-lfs-transfer"]
+	path = radicle-lfs-transfer
+	url = ../radicle-lfs-transfer.git

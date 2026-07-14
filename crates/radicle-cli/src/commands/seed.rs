@@ -70,6 +70,19 @@ pub fn update(
         term::format::tertiary(rid),
     );
 
+    // Since seeding a repository means keeping a full local copy of it,
+    // also pin any of its Git-LFS objects that are stored in IPFS, so
+    // that they follow the same seed/unseed lifecycle.
+    if let Ok(repo) = profile.storage.repository(rid) {
+        let cids = crate::ipfs::lfs_cids(&repo.backend);
+        if !cids.is_empty() {
+            let pinned = crate::ipfs::pin_all(&cids);
+            if pinned > 0 {
+                term::success!("Pinned {pinned} LFS object(s) in IPFS");
+            }
+        }
+    }
+
     Ok(())
 }
 

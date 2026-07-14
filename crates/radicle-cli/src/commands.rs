@@ -14,6 +14,7 @@ pub mod inbox;
 pub mod init;
 pub mod inspect;
 pub mod issue;
+pub mod lfs;
 pub mod ls;
 pub mod node;
 pub mod patch;

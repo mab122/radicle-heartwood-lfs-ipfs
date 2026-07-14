@@ -4,6 +4,7 @@
 #![deny(clippy::print_stdout)]
 pub mod commands;
 pub mod git;
+pub mod ipfs;
 pub mod node;
 pub mod pager;
 pub mod project;

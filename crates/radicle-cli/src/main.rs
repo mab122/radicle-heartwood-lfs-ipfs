@@ -76,6 +76,7 @@ enum Command {
     #[command(alias = ".")]
     Inspect(inspect::Args),
     Issue(issue::Args),
+    Lfs(lfs::Args),
     Ls(ls::Args),
     Node(node::Args),
     Patch(patch::Args),
@@ -271,6 +272,7 @@ fn run_command(command: Command, ctx: impl term::Context) -> Result<(), anyhow::
         Command::Init(args) => init::run(args, ctx),
         Command::Inspect(args) => inspect::run(args, ctx),
         Command::Issue(args) => issue::run(args, ctx),
+        Command::Lfs(args) => lfs::run(args, ctx),
         Command::Ls(args) => ls::run(args, ctx),
         Command::Node(args) => node::run(args, ctx),
         Command::Patch(args) => patch::run(args, ctx),
