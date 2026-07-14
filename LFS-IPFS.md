@@ -20,23 +20,76 @@ file-CID mapping travels with the repository itself, avoiding a single point of 
 
 ## How it works
 
-- **The mapping**: a `cid=<cid>` git note on `refs/notes/rad-lfs`, attached to each LFS
-  pointer file's own git blob hash (not the LFS oid — a different value). Verified against
-  this repo's actual replication code (`references_of` in
-  `crates/radicle/src/storage/git.rs`) that Radicle replicates every ref under a peer's
-  namespace except `refs/tmp/heads/*` — there's no fixed allowlist, so this notes ref
-  replicates the same way `refs/heads`/`refs/tags`/`refs/cobs` do, once the push/fetch
-  refspecs below are configured.
-- **On commit**: a pre-commit hook (installed by `rad lfs init`) adds each staged LFS-tracked
-  file to your local IPFS daemon, pins it, and writes the note above.
+- **The mapping**: a JSON git note on `refs/notes/rad-lfs`, attached to each LFS pointer
+  file's own git blob hash (not the LFS oid — a different value), e.g. `{"v":1,"cid":"Qm..."}`
+  for a public-repo object. Verified against this repo's actual replication code
+  (`references_of` in `crates/radicle/src/storage/git.rs`) that Radicle replicates every ref
+  under a peer's namespace except `refs/tmp/heads/*` — there's no fixed allowlist, so this
+  notes ref replicates the same way `refs/heads`/`refs/tags`/`refs/cobs` do, once the
+  push/fetch refspecs below are configured.
+- **On commit**: a pre-commit hook (installed by `rad lfs init`) computes each staged
+  LFS-tracked file's oid/size and shells out to `rad lfs store`, which adds it to your local
+  IPFS daemon, pins it, and writes the note above — encrypting the content first if the
+  repository is private (see below).
 - **On push/pull**: the actual bytes move through
   [`rad-lfs-transfer`][rad-lfs-transfer], a Git LFS custom transfer agent — see that repo for
-  details. It's a separate binary/repository since it has nothing Radicle-specific in it; it
-  only needs a local IPFS daemon and a git repository with the notes above.
+  details. It's a separate binary/repository since it has nothing Radicle-specific in it (no
+  identity, no keys, no encryption); it shells out to `rad lfs store`/`rad lfs fetch` for the
+  actual work.
 - **Seeding**: `rad seed` now also pins a repository's known LFS objects in your local IPFS
   node (mirroring "seeding = keep a full copy"); `rad unseed` unpins them. Known prototype
   limitation: no cross-repository pin refcounting, so unseeding one repository can unpin
   content still needed by another seeded repository that happens to share the same CID.
+
+## Encryption for private repositories
+
+Radicle's `Visibility::Private` is enforced entirely by access control at the replication
+layer — git objects for a private repo are plain, unencrypted objects, protected only by
+"unauthorized peers are never given them" (see `crates/radicle/src/identity/doc.rs`). That
+protection has no jurisdiction over IPFS's own block-exchange layer: once a legitimate
+collaborator's IPFS daemon pins content and joins the network, anyone who obtains the CID by
+any means can fetch the plaintext directly. So for private repositories, `rad lfs store`
+encrypts content before it ever reaches IPFS:
+
+- A random per-object content key (CEK) encrypts the file (XChaCha20-Poly1305).
+- The CEK is wrapped once per authorized recipient (repo delegates + the private allow-list),
+  using ECDH between the committer's and each recipient's Radicle identity key (Ed25519,
+  directly on the curve — no separate encryption keypair to manage) plus HKDF, so only
+  identities Radicle already considers authorized for the repo can decrypt.
+- The wrapped keys travel in the same git note as the CID — no separate key-distribution
+  mechanism, no server.
+
+**This requires a signer capable of key agreement (ECDH), not just signing.** An ssh-agent-only
+signer can sign but can't expose the key material ECDH needs. Concretely: `rad lfs store`/
+`rad lfs fetch`/`rad lfs rekey` on a *private* repository require either an unencrypted
+keystore, or `RAD_PASSPHRASE` set in the environment — including inside the pre-commit hook at
+commit time. If neither is available, these commands fail immediately with a clear message
+telling you to set `RAD_PASSPHRASE`, rather than hanging on a passphrase prompt inside a
+non-interactive hook. Public repositories are entirely unaffected — no keys, no ECDH, same
+plaintext behavior as before.
+
+### Granting access to existing objects: `rad lfs rekey`
+
+Radicle's access control is retroactive: once a DID is authorized, it can replicate a
+repository's entire history, including everything from before it was added. Without extra
+handling, this encryption design would *not* match that: a newly-authorized collaborator could
+see a private repo's full git history but be permanently unable to decrypt any LFS object
+committed before they were granted access, since those objects' wrapped-key lists only include
+whoever was authorized at the time.
+
+`rad lfs rekey` closes that gap. Run by anyone *already* authorized (it can't be self-served by
+the new collaborator — they have nothing to decrypt yet), it walks every encrypted object,
+recovers each one's content key using the runner's own existing access, and adds a wrapped-key
+entry for any currently-authorized DID that's missing one. It never re-encrypts content or
+touches IPFS — it's a pure git-notes operation, so it's fast and doesn't need the original
+file. Run it after adding a new delegate or allow-listing a new DID on a private repository, if
+you want them to have access to previously-committed LFS objects (not automatic — see
+[Prerequisites](#prerequisites)/[Use](#use) below for the full flow).
+
+**Still explicitly not solved**: revocation. A formerly-authorized peer who already decrypted
+an object can't be made to un-know its content key — the same fundamental limitation as
+Radicle's own replication-based access control (already-replicated git objects can't be
+un-seen either), not a regression introduced by this design.
 
 [rad-lfs-transfer]: https://git.hswro.org/mab122/radicle-lfs-transfer
 
@@ -131,6 +184,13 @@ git lfs pull                   # fetches large files via IPFS instead of git
 IPFS node, so seeding a repository keeps a full copy of its large files too, not just its git
 history.
 
+**On a private repository**, make sure `RAD_PASSPHRASE` is set (or your keystore is
+unencrypted) before committing — see [Encryption for private repositories](#encryption-for-private-repositories)
+above. After granting a new collaborator access (`rad id update --allow <did>` or adding them
+as a delegate), have an already-authorized collaborator run `rad lfs rekey` and push, so the
+new collaborator can decrypt previously-committed LFS objects too, not just ones committed
+after they were added.
+
 ### What happens without an IPFS daemon running
 
 - `rad lfs init` checks upfront and refuses with a clear message
@@ -150,7 +210,9 @@ history.
 | `Git LFS is not installed (the 'git-lfs' binary was not found on your PATH)` | Install [Git LFS](https://git-lfs.com). |
 | `no IPFS (Kubo) daemon reachable at ...` | Start one: `ipfs daemon` (see [Run](#run) above). |
 | `rad-lfs-transfer: command not found` during `git lfs push`/`pull` | `cargo install --path radicle-lfs-transfer` didn't complete, or `~/.radicle/bin` isn't on `PATH`. |
-| Large file didn't get pinned (commit went through, but no `rad-lfs` note) | The pre-commit hook silently skips pinning if the `ipfs` CLI isn't on `PATH` — check `command -v ipfs`. Re-add the file and commit again once it is. |
+| Large file didn't get pinned (commit went through, but no `rad-lfs` note) | The pre-commit hook silently skips pinning if the `ipfs`/`rad` CLIs aren't on `PATH` — check `command -v ipfs` / `command -v rad`. Re-add the file and commit again once available. |
+| `private-repo LFS operations need to perform a key-agreement (ECDH) operation ... Set RAD_PASSPHRASE` | Your keystore is encrypted and no passphrase is available (an ssh-agent-only signer can't do key agreement). Set `RAD_PASSPHRASE` in the environment the commit/fetch runs in, or use an unencrypted keystore. |
+| `you are not an authorized recipient of this object` | Either genuinely unauthorized (not a delegate/allow-listed DID for this private repo), or authorized *after* this specific object was committed and nobody has run `rad lfs rekey` since — ask an already-authorized collaborator to run it and push. |
 
 ## Status
 

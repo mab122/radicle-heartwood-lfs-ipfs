@@ -42,19 +42,26 @@ const HOOK_END: &str = "# <<< rad-lfs-init managed pre-commit hook <<<";
 ///
 /// For every file staged in the commit that's tracked by Git LFS (i.e.
 /// matches a `filter=lfs` pattern in `.gitattributes`), this:
-///  1. `ipfs add`s the real file content to the local Kubo daemon,
-///  2. `ipfs pin add`s the resulting CID,
-///  3. computes the git blob hash of the LFS pointer text for that file, and
-///  4. writes a `cid=<cid>` git note on that blob hash under
-///     `refs/notes/rad-lfs`.
+///  1. computes the file's LFS oid (sha256) and size, and
+///  2. shells out to `rad lfs store` with those values, which does the
+///     actual IPFS add/pin (encrypting first for private repos) and writes
+///     the corresponding note on `refs/notes/rad-lfs` itself.
 ///
-/// This mirrors `radicle-lfs-server`'s `notes::pointer_blob_hash` /
-/// `notes::write_cid` logic (see that crate's `src/notes.rs`), reimplemented
-/// here as a shell script since a git hook has no business depending on a
-/// separate Rust crate.
+/// The hook only computes the cheap, dependency-free oid/size values in
+/// shell; the CID/encryption/git-notes logic lives in `rad lfs store`
+/// (see `commands/lfs/store.rs`) since it needs access to the repo's
+/// identity/visibility and (for private repos) key material that a plain
+/// shell script has no business handling — a git hook shelling out to our
+/// own `rad` binary is far simpler than reimplementing that here.
+///
+/// Requires both `ipfs` and `rad` to be available on `PATH` at commit time.
 const HOOK_BODY: &str = r#"rad_lfs_precommit() {
     command -v ipfs >/dev/null 2>&1 || {
         echo "rad-lfs: 'ipfs' CLI not found on PATH; skipping CID pinning for this commit" >&2
+        return 0
+    }
+    command -v rad >/dev/null 2>&1 || {
+        echo "rad-lfs: 'rad' CLI not found on PATH; skipping CID pinning for this commit" >&2
         return 0
     }
 
@@ -79,24 +86,8 @@ const HOOK_BODY: &str = r#"rad_lfs_precommit() {
         oid=$(sha256 "$file") || { rm -f "$staged"; exit 1; }
         size=$(wc -c < "$file" | tr -d ' ')
 
-        cid=$(ipfs add -Q -- "$file") || {
-            echo "rad-lfs: 'ipfs add' failed for $file" >&2
-            rm -f "$staged"
-            exit 1
-        }
-        ipfs pin add -- "$cid" >/dev/null || {
-            echo "rad-lfs: 'ipfs pin add' failed for $cid" >&2
-            rm -f "$staged"
-            exit 1
-        }
-
-        blob_sha=$(printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$size" | git hash-object --stdin -t blob) || {
-            rm -f "$staged"
-            exit 1
-        }
-
-        git notes --ref=refs/notes/rad-lfs add -f -m "cid=$cid" "$blob_sha" >/dev/null || {
-            echo "rad-lfs: failed to write git note for $file" >&2
+        rad lfs store --oid "$oid" --size "$size" -- "$file" >/dev/null || {
+            echo "rad-lfs: 'rad lfs store' failed for $file" >&2
             rm -f "$staged"
             exit 1
         }

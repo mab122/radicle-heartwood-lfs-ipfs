@@ -3,8 +3,10 @@
 //! This is a prototype of "Git-LFS over IPFS": large files tracked via
 //! Git LFS are stored in IPFS rather than as git blobs, and the mapping
 //! from an LFS pointer file's git blob oid to the corresponding IPFS CID
-//! is recorded as a git note on `refs/notes/rad-lfs` (note content
-//! `cid=<cid>`).
+//! is recorded as a git note on `refs/notes/rad-lfs` (note content is a
+//! JSON [`crate::lfs_crypto::Envelope`], e.g. `{"v":1,"cid":"Qm...",
+//! "enc":null}` for a public repo, or with populated `enc` metadata for
+//! a private one).
 //!
 //! Since seeding a repository already means "keep a full local copy of
 //! it", we extend that lifecycle to IPFS: seeding a repository pins all
@@ -70,11 +72,75 @@ pub fn lfs_cids(repo: &Repository) -> Vec<String> {
         let Some(message) = note.message() else {
             continue;
         };
-        if let Some(cid) = message.trim().strip_prefix("cid=") {
-            cids.push(cid.to_string());
+        if let Ok(envelope) = serde_json::from_str::<crate::lfs_crypto::Envelope>(message) {
+            cids.push(envelope.cid);
         }
     }
     cids
+}
+
+/// Add `bytes` to the local IPFS node as a single blob, returning its CID.
+pub fn add(bytes: &[u8]) -> anyhow::Result<String> {
+    use ureq::unversioned::multipart::{Form, Part};
+
+    let base = kubo_api_url();
+    let url = format!("{base}/api/v0/add");
+
+    let form = Form::new().part("file", Part::bytes(bytes).file_name("blob"));
+
+    let mut response = ureq::post(&url).send(form).map_err(|err| {
+        if is_daemon_unreachable(&err) {
+            anyhow!(
+                "no IPFS (Kubo) daemon reachable at {base} — start one with `ipfs daemon`.\n\
+                 This repo's large-file (LFS) support is backed by your local IPFS node."
+            )
+        } else {
+            anyhow!("failed to add object to IPFS: {err}")
+        }
+    })?;
+
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| anyhow!("failed to read IPFS `add` response: {err}"))?;
+    // The response is newline-delimited JSON, one object per added file;
+    // we only ever add a single blob per call, so the first line is all
+    // we need.
+    let line = body
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("empty response from IPFS `add`"))?;
+    let value: serde_json::Value = serde_json::from_str(line)
+        .map_err(|err| anyhow!("failed to parse IPFS `add` response: {err}"))?;
+    let hash = value
+        .get("Hash")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| anyhow!("IPFS `add` response missing a `Hash` field"))?;
+
+    Ok(hash.to_string())
+}
+
+/// Fetch the raw bytes of the object identified by `cid` from the local
+/// IPFS node.
+pub fn cat(cid: &str) -> anyhow::Result<Vec<u8>> {
+    let base = kubo_api_url();
+    let url = format!("{base}/api/v0/cat?arg={cid}");
+
+    let mut response = ureq::post(&url).send_empty().map_err(|err| {
+        if is_daemon_unreachable(&err) {
+            anyhow!(
+                "no IPFS (Kubo) daemon reachable at {base} — start one with `ipfs daemon`.\n\
+                 This repo's large-file (LFS) support is backed by your local IPFS node."
+            )
+        } else {
+            anyhow!("failed to fetch object {cid} from IPFS: {err}")
+        }
+    })?;
+
+    response
+        .body_mut()
+        .read_to_vec()
+        .map_err(|err| anyhow!("failed to read IPFS `cat` response for {cid}: {err}"))
 }
 
 /// Whether a `ureq` error indicates that the local IPFS daemon could

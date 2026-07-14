@@ -22,4 +22,28 @@ pub struct Args {
 pub enum Command {
     /// Set up Git LFS support for this repository, backed by IPFS
     Init,
+    /// Store an LFS object's content in IPFS (invoked by the custom
+    /// transfer agent; not for interactive use)
+    #[command(hide = true)]
+    Store {
+        #[arg(long)]
+        oid: String,
+        #[arg(long)]
+        size: i64,
+        path: std::path::PathBuf,
+    },
+    /// Fetch an LFS object's content from IPFS (invoked by the custom
+    /// transfer agent; not for interactive use)
+    #[command(hide = true)]
+    Fetch {
+        #[arg(long)]
+        oid: String,
+        #[arg(long)]
+        size: i64,
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Grant newly-authorized collaborators access to previously-encrypted
+    /// LFS objects
+    Rekey,
 }
