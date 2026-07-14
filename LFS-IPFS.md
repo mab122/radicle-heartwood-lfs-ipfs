@@ -59,14 +59,24 @@ encrypts content before it ever reaches IPFS:
 - The wrapped keys travel in the same git note as the CID — no separate key-distribution
   mechanism, no server.
 
-**This requires a signer capable of key agreement (ECDH), not just signing.** An ssh-agent-only
-signer can sign but can't expose the key material ECDH needs. Concretely: `rad lfs store`/
-`rad lfs fetch`/`rad lfs rekey` on a *private* repository require either an unencrypted
-keystore, or `RAD_PASSPHRASE` set in the environment — including inside the pre-commit hook at
-commit time. If neither is available, these commands fail immediately with a clear message
-telling you to set `RAD_PASSPHRASE`, rather than hanging on a passphrase prompt inside a
-non-interactive hook. Public repositories are entirely unaffected — no keys, no ECDH, same
-plaintext behavior as before.
+**This requires a signer capable of key agreement (ECDH), not just signing.** ssh-agent — the
+normal day-to-day flow after `rad auth` — can sign but can't expose the key material ECDH
+needs; that's a hard limitation of the standard ssh-agent protocol (it only implements
+signing, there's no request type for general key agreement), not something to configure
+around. `rad lfs store`/`rad lfs fetch`/`rad lfs rekey` on a *private* repository fall back to
+whichever of these applies, in order:
+
+1. An unencrypted keystore, if that's how you've set things up.
+2. `RAD_PASSPHRASE`, if set in the environment.
+3. **An interactive passphrase prompt**, if connected to a terminal — the same fallback
+   `rad`'s other commands already use when ssh-agent isn't available or the key isn't
+   registered with it. This covers the common case (an interactive `git commit` triggering
+   the pre-commit hook, which inherits the terminal) with no env var needed at all.
+
+Only a genuinely non-interactive context (CI, a script with no TTY, `RAD_PASSPHRASE` unset)
+hits a hard failure — and it fails fast with a clear message, rather than hanging waiting on a
+prompt that can't be answered. Public repositories are entirely unaffected — no keys, no ECDH,
+same plaintext behavior as before.
 
 ### Granting access to existing objects: `rad lfs rekey`
 
@@ -184,12 +194,12 @@ git lfs pull                   # fetches large files via IPFS instead of git
 IPFS node, so seeding a repository keeps a full copy of its large files too, not just its git
 history.
 
-**On a private repository**, make sure `RAD_PASSPHRASE` is set (or your keystore is
-unencrypted) before committing — see [Encryption for private repositories](#encryption-for-private-repositories)
-above. After granting a new collaborator access (`rad id update --allow <did>` or adding them
-as a delegate), have an already-authorized collaborator run `rad lfs rekey` and push, so the
-new collaborator can decrypt previously-committed LFS objects too, not just ones committed
-after they were added.
+**On a private repository**, committing from a terminal you'll be prompted for your passphrase
+if needed (see [Encryption for private repositories](#encryption-for-private-repositories)
+above) — no extra setup required. After granting a new collaborator access
+(`rad id update --allow <did>` or adding them as a delegate), have an already-authorized
+collaborator run `rad lfs rekey` and push, so the new collaborator can decrypt
+previously-committed LFS objects too, not just ones committed after they were added.
 
 ### What happens without an IPFS daemon running
 
@@ -211,7 +221,7 @@ after they were added.
 | `no IPFS (Kubo) daemon reachable at ...` | Start one: `ipfs daemon` (see [Run](#run) above). |
 | `rad-lfs-transfer: command not found` during `git lfs push`/`pull` | `cargo install --path radicle-lfs-transfer` didn't complete, or `~/.radicle/bin` isn't on `PATH`. |
 | Large file didn't get pinned (commit went through, but no `rad-lfs` note) | The pre-commit hook silently skips pinning if the `ipfs`/`rad` CLIs aren't on `PATH` — check `command -v ipfs` / `command -v rad`. Re-add the file and commit again once available. |
-| `private-repo LFS operations need to perform a key-agreement (ECDH) operation ... Set RAD_PASSPHRASE` | Your keystore is encrypted and no passphrase is available (an ssh-agent-only signer can't do key agreement). Set `RAD_PASSPHRASE` in the environment the commit/fetch runs in, or use an unencrypted keystore. |
+| `private-repo LFS operations need to perform a key-agreement (ECDH) operation ...` | Your keystore is encrypted, ssh-agent can't do key agreement (protocol limitation), and no passphrase is available — normally you'd just be prompted interactively; this only happens in a non-interactive context (no TTY, e.g. CI). Set `RAD_PASSPHRASE`, or use an unencrypted keystore, or run it from a terminal. |
 | `you are not an authorized recipient of this object` | Either genuinely unauthorized (not a delegate/allow-listed DID for this private repo), or authorized *after* this specific object was committed and nobody has run `rad lfs rekey` since — ask an already-authorized collaborator to run it and push. |
 | `fatal: couldn't find remote ref refs/notes/rad-lfs` on `git fetch`/`git pull` (breaks *all* fetching, not just LFS) | Fixed — but if this repo had `rad lfs init` run against an older build, re-run `rad lfs init` once to replace the stale, now-invalid fetch refspec it configured (see `NOTES-lfs-notes-fetch-bug.md` for the full story). |
 | Plain `git push rad` (no branch name) doesn't push your commits, only the notes ref | Known, separate quirk: once any explicit push refspec is configured (which `rad lfs init` does), git stops falling back to pushing the current branch by default. Always push explicitly: `git push rad <branch>`. |

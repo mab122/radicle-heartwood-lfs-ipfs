@@ -102,10 +102,24 @@ pub fn recipients_for(doc: &Doc, sender: Did) -> BTreeSet<Did> {
 }
 
 /// Loads a signer capable of ECDH. Only `MemorySigner` implements the
-/// `Ecdh` trait -- an ssh-agent-backed signer can sign but can't expose
-/// the raw key material a key-agreement operation needs. Fails fast with
-/// an actionable message instead of hanging on a passphrase prompt, which
-/// matters since this may run inside a non-interactive git hook.
+/// `Ecdh` trait -- ssh-agent (the normal day-to-day flow after `rad
+/// auth`) can sign but can't expose the raw key material a key-agreement
+/// operation needs. This is a hard limitation of the standard ssh-agent
+/// protocol, which only implements signing operations, not general key
+/// agreement -- there's no ssh-agent request type for it, so this can't
+/// be routed through the agent the way signing is.
+///
+/// The next best thing, matching the exact fallback
+/// `crate::terminal::io::signer` already uses elsewhere in this CLI when
+/// ssh-agent isn't available or the key isn't registered with it: if
+/// connected to a TTY, prompt interactively for the passphrase instead of
+/// requiring `RAD_PASSPHRASE` to be pre-set. This covers the common case
+/// (an interactive `git commit` triggering the pre-commit hook, which
+/// inherits the terminal's TTY) without needing an env var at all; only
+/// genuinely non-interactive contexts (CI, a script with no TTY) still
+/// need `RAD_PASSPHRASE`, and get a fast, clear failure rather than a
+/// hang, since `inquire` (via `radicle_term::io::passphrase`) returns
+/// `Ok(None)` on `NotTTY` rather than blocking.
 pub fn load_signer(profile: &Profile) -> anyhow::Result<MemorySigner> {
     if !profile.keystore.is_encrypted()? {
         return Ok(MemorySigner::load(&profile.keystore, None)?);
@@ -113,11 +127,24 @@ pub fn load_signer(profile: &Profile) -> anyhow::Result<MemorySigner> {
     if let Some(passphrase) = radicle::profile::env::passphrase() {
         return Ok(MemorySigner::load(&profile.keystore, Some(passphrase))?);
     }
+    if let Some(passphrase) = prompt_passphrase(profile)? {
+        return Ok(MemorySigner::load(&profile.keystore, Some(passphrase))?);
+    }
     bail!(
         "private-repo LFS operations need to perform a key-agreement (ECDH) operation, which \
-         requires direct access to your secret key -- an ssh-agent-only signer can't do this. \
-         Set RAD_PASSPHRASE (or use an unencrypted keystore) and try again."
+         requires direct access to your secret key -- ssh-agent can sign but can't do this \
+         (a protocol limitation, not something to configure around). Run this from a \
+         terminal to be prompted for your passphrase, or set RAD_PASSPHRASE, or use an \
+         unencrypted keystore."
     )
+}
+
+/// Prompts for the keystore passphrase if connected to a TTY. Returns
+/// `Ok(None)` (not an error) when there's no TTY to prompt on, so callers
+/// can fall through to a clear error instead of hanging.
+fn prompt_passphrase(profile: &Profile) -> anyhow::Result<Option<radicle_crypto::ssh::keystore::Passphrase>> {
+    let validator = crate::terminal::io::PassphraseValidator::new(profile.keystore.clone());
+    Ok(crate::terminal::io::passphrase(validator)?)
 }
 
 /// Encrypts `plaintext` with a fresh content key, then wraps that key once
