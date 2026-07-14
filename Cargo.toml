@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["radicle-lfs-transfer"]
 resolver = "2"
 
 [workspace.package]
