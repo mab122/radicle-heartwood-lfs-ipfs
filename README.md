@@ -1,8 +1,59 @@
 # ❤️🪵
 
-> **Note:** this is a fork of upstream `heartwood` adding Git LFS (large file) support backed
-> by IPFS. See [`LFS-IPFS.md`](LFS-IPFS.md) for what's added and how to set it up; everything
-> below is upstream's own documentation, unchanged.
+> ## Fork: Git LFS support, backed by IPFS
+>
+> This is a fork of upstream [`radicle-dev/heartwood`](https://github.com/radicle-dev/heartwood)
+> adding Git LFS (large file) support, with large file content stored on each contributor's own
+> local IPFS node rather than a central server. Everything below the horizontal rule is
+> upstream's own README, unchanged. See [`LFS-IPFS.md`](LFS-IPFS.md) for the full design,
+> troubleshooting, and background — this section is just the quick start.
+>
+> The LFS byte-transfer logic lives in a separate, small companion repository:
+> [**radicle-lfs-transfer**](https://git.hswro.org/mab122/radicle-lfs-transfer), included here
+> as a git submodule.
+>
+> ### Dependencies (Arch Linux)
+>
+> ```sh
+> # To build and install rad/radicle-node/radicle-lfs-transfer
+> sudo pacman -S --needed rust git openssh base-devel
+>
+> # To actually use Git LFS (not needed to build/install anything)
+> sudo pacman -S --needed git-lfs kubo
+> ```
+>
+> On other distributions: a Rust toolchain (e.g. via [rustup](https://rustup.rs)), Git, OpenSSH,
+> a C toolchain — and, only for using `rad lfs`, [Git LFS](https://git-lfs.com) and
+> [Kubo](https://docs.ipfs.tech/install/).
+>
+> ### Zero to usable
+>
+> ```sh
+> # Clone with the submodule
+> git clone --branch rad-lfs-ipfs --recurse-submodules \
+>   ssh://git@git.hswro.org:9022/mab122/radicle-heartwood-lfs.git
+> cd radicle-heartwood-lfs
+>
+> # Build & install rad, radicle-node, git-remote-rad, and rad-lfs-transfer to one place
+> cargo install --path crates/radicle-cli --force --locked --root ~/.radicle
+> cargo install --path crates/radicle-node --force --locked --root ~/.radicle
+> cargo install --path crates/radicle-remote-helper --force --locked --root ~/.radicle
+> cargo install --path radicle-lfs-transfer --force --locked --root ~/.radicle
+>
+> # Add the install root to your PATH (e.g. in ~/.bashrc / ~/.zshrc)
+> export PATH="$HOME/.radicle/bin:$PATH"
+>
+> # Verify
+> rad --version
+> ```
+>
+> From here, use `rad` exactly as upstream describes below (`rad auth`, `rad init`, etc). The
+> only new command is `rad lfs init`, run once inside a repository you want large-file support
+> in — see [`LFS-IPFS.md`](LFS-IPFS.md) for that workflow. **Nothing above requires IPFS**;
+> Git LFS support specifically needs a running `ipfs daemon`, and `rad lfs init` will tell you
+> plainly if one isn't reachable rather than failing confusingly later.
+
+---
 
 *Radicle Heartwood Protocol & Stack*
 

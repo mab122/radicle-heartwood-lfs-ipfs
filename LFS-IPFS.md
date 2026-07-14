@@ -41,26 +41,119 @@ local IPFS node, and the file-CID mapping travels with the repository itself.
   limitation: no cross-repository pin refcounting, so unseeding one repository can unpin
   content still needed by another seeded repository that happens to share the same CID.
 
-[rad-lfs-transfer]: ../radicle-lfs-transfer
+[rad-lfs-transfer]: https://git.hswro.org/mab122/radicle-lfs-transfer
 
-## Setup
+## Prerequisites
+
+- A [Rust toolchain](https://rustup.rs) (stable; see `rust-toolchain.toml` for the exact
+  version this workspace pins), Git, and OpenSSH.
+- [Git LFS](https://git-lfs.com) (`git-lfs` on your `PATH`) — only needed to *use* `rad lfs`,
+  not to build or install anything.
+- A local IPFS (Kubo) daemon — also only needed to *use* `rad lfs`, not to build/install.
+  Install [Kubo](https://docs.ipfs.tech/install/) and make sure `ipfs` is on your `PATH`.
+
+On Arch Linux:
 
 ```sh
-# Build & install both binaries (from a checkout with the submodule fetched)
-git submodule update --init
-cargo install --path .
-cargo install --path radicle-lfs-transfer
-
-# One-time, per repository
-rad lfs init
+sudo pacman -S --needed rust git openssh base-devel   # build
+sudo pacman -S --needed git-lfs kubo                  # use `rad lfs`
 ```
 
-`rad lfs init` requires a local IPFS (Kubo) daemon to be reachable — it checks upfront and
-fails with a clear message (e.g. "start one with `ipfs daemon`") rather than silently
-continuing. **Nothing else in this fork requires IPFS.** Building, installing, and using `rad`
-for anything other than the `lfs` command works exactly as upstream, with no IPFS dependency
-at all. `rad seed`/`rad unseed` will warn (not fail) if a local IPFS daemon isn't reachable
-when they try to pin/unpin LFS objects — seeding/unseeding itself still succeeds.
+## Build & install
+
+Follows upstream `heartwood`'s own install convention (`cargo install --root ~/.radicle`, one
+shared install root for the whole stack), with `radicle-lfs-transfer` added the same way:
+
+```sh
+git clone --branch rad-lfs-ipfs --recurse-submodules \
+  ssh://git@git.hswro.org:9022/mab122/radicle-heartwood-lfs.git
+cd radicle-heartwood-lfs
+
+cargo install --path crates/radicle-cli --force --locked --root ~/.radicle
+cargo install --path crates/radicle-node --force --locked --root ~/.radicle
+cargo install --path crates/radicle-remote-helper --force --locked --root ~/.radicle
+cargo install --path radicle-lfs-transfer --force --locked --root ~/.radicle
+```
+
+Add `~/.radicle/bin` to your `PATH` (e.g. in `~/.bashrc`/`~/.zshrc`):
+
+```sh
+export PATH="$HOME/.radicle/bin:$PATH"
+```
+
+Confirm everything landed correctly:
+
+```sh
+rad --version
+command -v rad-lfs-transfer   # just needs to resolve; it only speaks git-lfs's stdin/stdout protocol, no --help output
+```
+
+If you already cloned without `--recurse-submodules`, run `git submodule update --init` before
+building — otherwise `radicle-lfs-transfer/` will be an empty directory and that last
+`cargo install` step will fail.
+
+## Run
+
+Nothing extra to run for `rad`/`radicle-node` themselves — use them exactly as upstream
+(`rad auth`, `radicle-node`, etc.; see the main [README](README.md) and
+[`docs/`](https://app.radicle.xyz/nodes/seed.radicle.xyz/rad:zzz)). The only new moving part is
+the IPFS daemon, needed only when you use `rad lfs`:
+
+```sh
+ipfs init      # first time only, creates ~/.ipfs
+ipfs daemon    # leave running in the background while you use `rad lfs`
+```
+
+## Use
+
+Inside a Radicle repository you're a contributor on (i.e. it already has a `rad` remote from
+`rad init`/`rad clone`):
+
+```sh
+# One-time per repository (with the IPFS daemon above already running)
+rad lfs init
+
+# Then it's just Git LFS, as normal
+git lfs track "*.psd"          # or whatever large-file patterns you need
+git add .gitattributes
+git add my-large-file.psd
+git commit -m "Add asset"      # pre-commit hook pins it to IPFS and records the CID here
+rad push                       # pushes the commit and the refs/notes/rad-lfs mapping together
+```
+
+Someone else cloning the same repository:
+
+```sh
+rad clone rad:<repo-id>
+cd <repo>
+rad lfs init                   # one-time, same as above (needs their own IPFS daemon running)
+git lfs pull                   # fetches large files via IPFS instead of git
+```
+
+`rad seed`/`rad unseed` additionally pin/unpin a repository's known LFS objects in your local
+IPFS node, so seeding a repository keeps a full copy of its large files too, not just its git
+history.
+
+### What happens without an IPFS daemon running
+
+- `rad lfs init` checks upfront and refuses with a clear message
+  (`no IPFS (Kubo) daemon reachable at http://127.0.0.1:5001 — start one with 'ipfs daemon'`)
+  rather than silently continuing.
+- `rad seed`/`rad unseed` print a warning and skip pinning/unpinning — seeding/unseeding itself
+  still succeeds.
+- **Nothing else in this fork needs IPFS at all.** Building, installing, and using `rad` for
+  anything other than `rad lfs`/pinning works exactly like upstream `heartwood`, with zero IPFS
+  dependency.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `` `rad lfs init` must be run inside a Radicle repository working copy `` | Run it inside a directory that already has a `rad` remote (from `rad init` or `rad clone`), not a plain git repo. |
+| `Git LFS is not installed (the 'git-lfs' binary was not found on your PATH)` | Install [Git LFS](https://git-lfs.com). |
+| `no IPFS (Kubo) daemon reachable at ...` | Start one: `ipfs daemon` (see [Run](#run) above). |
+| `rad-lfs-transfer: command not found` during `git lfs push`/`pull` | `cargo install --path radicle-lfs-transfer` didn't complete, or `~/.radicle/bin` isn't on `PATH`. |
+| Large file didn't get pinned (commit went through, but no `rad-lfs` note) | The pre-commit hook silently skips pinning if the `ipfs` CLI isn't on `PATH` — check `command -v ipfs`. Re-add the file and commit again once it is. |
 
 ## Status
 
