@@ -2,8 +2,18 @@
 
 **RESOLVED** (2026-07-14). Fix: `refs/notes/rad-lfs` is now exposed per-peer
 (`refs/notes/rad-lfs/<peer-id>`) instead of expecting one canonical bare ref, matching how
-patch refs already work — see "Fix actually shipped" at the bottom for the full writeup and
-verification. Kept the original report below unedited for context.
+patch refs already work — see "Fix actually shipped" for the full writeup and verification.
+
+**Follow-up "Bug #2" also RESOLVED** (2026-07-14, same day) — turned out to be two separate
+things, neither a bug in the fix above: a stale, unrelated system-wide `git-remote-rad`
+install being silently used in manual ad-hoc testing (not a real pipeline issue), plus one
+genuinely new bug (a cross-device `rename()` failure on LFS download) found only once the
+real pipeline actually ran with the fix. See "Root cause of Bug #2, actually found" at the
+very bottom for the full story — verified live against the production deploy pipeline on
+mbator.pl, which completed successfully end-to-end.
+
+Kept the original report and the mid-investigation "Follow-up" section below unedited, for
+context on how the debugging actually went.
 
 Found while deploying `rad-lfs-ipfs` to mbator.pl for the blog pipeline (2026-07-14).
 Blocks the whole LFS-over-IPFS flow end-to-end, not just a cold-start edge case.
@@ -114,6 +124,65 @@ Re-run `git fetch rad` in `/home/blog/repo` on the VPS (as `blog`) — if the fi
 the notes ref, that fetch (and the LFS smudge it triggers) is the last remaining piece to
 confirm the whole IPFS content-fetch path end-to-end.
 
+## Follow-up: fix deployed, uncovered a second, more specific bug (2026-07-14, same day)
+
+Rebuilt both the local (`~/Blog/Blog`) and VPS (`/home/blog/repo`) checkouts against
+`ff762ef8` (the fix + the interactive-passphrase commit) and re-ran `rad lfs init` to pick
+up the migrated wildcard refspec (`+refs/notes/rad-lfs/*:refs/notes/rad-lfs/*`; the old
+exact-match entry needed manual removal once — `git update-ref -d refs/notes/rad-lfs` — on
+the author's machine where a stale *local* plain note ref pre-existed and D/F-conflicted
+with the incoming namespaced one; the `remove_refspec_if_present` migration in `init.rs`
+correctly stripped the *refspec config*, but doesn't (and structurally can't, from
+`init.rs`) also clean up a ref that already exists on disk from before).
+
+**On the author's machine**: `git fetch rad` now genuinely works — pulls
+`refs/notes/rad-lfs/<peer>` for real, exactly the repro case from the original bug.
+Confirmed fixed there.
+
+**On the VPS (`blog` user, second peer/node)**: same `rad lfs init` migration, but the
+actual fetch behaves inconsistently:
+
+- `git ls-remote rad` correctly lists the note:
+  `c4538c2d... refs/notes/rad-lfs/z6MkkphWkrBU3Buhh4ZN8Gtt9KLzn2DUsx3hZhhXirK7XAyn`
+- `git fetch rad` (relying on the configured wildcard refspec) silently skips it — only
+  reports `master` as `[up to date]`, no attempt at the notes ref, no error.
+- An **explicit** fetch of that exact literal ref name (copy-pasted straight from the
+  `ls-remote` output above) still fails outright:
+  ```
+  $ git fetch rad refs/notes/rad-lfs/z6MkkphWkrBU3Buhh4ZN8Gtt9KLzn2DUsx3hZhhXirK7XAyn:refs/notes/rad-lfs/z6MkkphWkrBU3Buhh4ZN8Gtt9KLzn2DUsx3hZhhXirK7XAyn
+  fatal: couldn't find remote ref refs/notes/rad-lfs/z6MkkphWkrBU3Buhh4ZN8Gtt9KLzn2DUsx3hZhhXirK7XAyn
+  ```
+
+So `git-remote-rad`'s ref listing is inconsistent *between its own `list` output and what
+`fetch` actually resolves against*, for the identical ref, in the identical process
+invocation style — `ls-remote` and `fetch` are supposed to both go through the remote
+helper's `list` verb (that's the whole point of `for_fetch()` being one shared function),
+so seeing them disagree points at something conditional in how `list` is invoked (fetch
+vs. ls-remote may pass different capabilities/args to the helper, e.g. a `list for-push`
+vs. plain `list`, or some caching), rather than `for_fetch()`'s ref-selection logic itself
+(which is presumably fine, given `ls-remote` gets it right).
+
+Confirmed the underlying data is genuinely present and correct the whole time (verified
+directly in `blog`'s node storage, bypassing git-remote-rad entirely):
+```
+$ git -C /home/blog/.radicle/storage/z2Z16c9C5BaqSQPfbVrGPGG68wAx3 for-each-ref | grep lfs
+c4538c2d... commit refs/namespaces/z6MkkphW.../refs/notes/rad-lfs
+```
+and the note content itself has the right CID and correctly lists `blog`'s own node DID
+(`z6Mkpqi56U6...`) as an authorized decrypt recipient. So this is purely a
+`git-remote-rad` transport/listing bug, not a storage/replication/encryption issue.
+
+**Not yet root-caused** — flagging with the concrete repro above rather than guessing
+further at the Rust internals blind. Two machines, two outcomes, same binary version, same
+refspec, same underlying data: something about the *fetch* invocation path differs from
+the *ls-remote* invocation path in a way that changes what the helper's `list` returns or
+how the client matches against it. Worth checking: does `list.rs` (or whatever calls
+`for_fetch()`) get invoked with different arguments for `list` vs. `list for-push` vs. a
+fetch-triggered `list`, and does the *local* `remote.<rad>.fetch` refspec (not just the
+server-side listing) factor into which lines the helper actually returns — i.e. is there a
+second, client-driven filtering step somewhere that behaves differently between the two
+call sites?
+
 ## Fix actually shipped
 
 Went with the "simplest" option from the list above, since it's also the semantically
@@ -189,3 +258,86 @@ problem in practice. Worth a real fix at some point (e.g. `rad lfs init` also en
 explicit `+refs/heads/*:refs/remotes/rad/*`-equivalent push default is present, or documenting
 "always `git push rad <branch>` explicitly" as a hard requirement), but out of scope for this
 specific fetch-bug fix.
+
+## Root cause of Bug #2, actually found (2026-07-14, same day, later)
+
+Got shell access to the VPS (`ssh mbator.pl`, passwordless sudo in a real tty) and reproduced
+directly rather than guessing further at the Rust internals. It was **two separate things**,
+not one — neither of them a bug in the fetch fix above.
+
+### Part 1: not a code bug at all — a stale, unrelated binary
+
+`sudo -u blog bash -c '...'` (a bare, non-login shell — the same style of ad-hoc command used
+for all the manual reproduction so far) resolves `PATH` to the plain system default
+(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), which has **no**
+`~/.radicle/bin` in it. `which rad` in that context returns `/usr/local/bin/rad` — version
+`1.8.0`, a completely unrelated, root-owned, March-2026 system-wide install, nothing to do
+with this fork. Confirmed directly:
+
+- With `PATH=/home/blog/.radicle/bin:$PATH` explicitly set: `git ls-remote rad` *and*
+  `git fetch rad` both correctly see and fetch `refs/notes/rad-lfs/<peer>` — full
+  `GIT_TRANSPORT_HELPER_DEBUG=1` trace shows `list` correctly advertising it and git correctly
+  issuing `fetch <oid> <ref>` for it, ending in `[new ref] refs/notes/rad-lfs/<peer>`.
+- With the bare/default `PATH` (resolving to `/usr/local/bin/git-remote-rad`, the unrelated old
+  binary): `git fetch rad` produces **zero output at all** — exactly the silent-skip symptom
+  originally reported, byte for byte.
+
+So `list`/`for_fetch()` never actually disagreed between `ls-remote` and `fetch` for the same
+binary — the two commands were, at some point during manual testing, silently invoking two
+*different* binaries. The real automated pipeline was never actually at risk from this: all
+three blog-owned systemd units (`radicle-node-blog`, `blog-radicle-watch`, `blog-deploy`)
+already have `Environment=...PATH=/home/blog/.radicle/bin:...` correctly set. Confirmed via
+`systemctl cat` on all three. This was purely a manual-testing artifact.
+
+### Part 2: a real, new bug — but only surfaces once you get past Part 1
+
+`blog-deploy.service`'s last run before the fork rebuild had failed with the *original*
+Bug #1 error (timestamped *before* the 16:10–16:14 UTC rebuild/restart) — meaning the real
+pipeline, with its correct `PATH`, hadn't actually run even once against the fetch fix yet.
+Triggering it manually (`sudo systemctl start blog-deploy.service`) surfaced a genuinely new
+failure:
+
+```
+Downloading assets/_infra-test/lfs-ipfs-smoketest.jpg (692 B)
+Error downloading object: ...: failed to copy downloaded file: cannot replace
+".../  .git/lfs/objects/c5/e3/c5e3b0c1..." with "/tmp/rad-lfs-c5e3b0c1...":
+rename /tmp/rad-lfs-c5e3b0c1... .../.git/lfs/objects/c5/e3/c5e3b0c1...: invalid cross-device link
+```
+
+The download and decryption had already succeeded by this point (692 B, matching exactly) —
+this was purely the final handoff to git-lfs failing. Root cause:
+`radicle-lfs-transfer/src/main.rs`'s `download_inner` reported a path under
+`std::env::temp_dir()` (`/tmp`) back to git-lfs as the "complete" event's path. Git-lfs then
+does an *atomic* `rename()` from that path into `.git/lfs/objects/...` — it does not fall back
+to a copy if that fails. On this VPS, `/tmp` and the repository are on different
+filesystems/mounts, so the rename hits `EXDEV` ("invalid cross-device link") and git-lfs just
+errors out rather than retrying with a copy.
+
+Fixed in `radicle-lfs-transfer` (commit `ac4a27c`): resolve `.git/lfs/tmp` (via
+`git rev-parse --git-dir`, so this works from a subdirectory too, not just the repo root) and
+download there instead, mirroring git-lfs's own existing convention for its own internal temp
+downloads — guaranteed same-filesystem by construction, not by hoping `/tmp` happens to line
+up. This does reintroduce a `git` binary runtime dependency for `rad-lfs-transfer` (previously
+dropped once it stopped needing to read/write notes directly) — an acceptable tradeoff, since
+anything using `rad`/git-lfs at all already requires git to be installed anyway. Submodule
+pointer bumped in this repo at `a97484c9`.
+
+### Verified live, for real, against production
+
+Deployed the fix to the VPS (`blog` has no Forgejo SSH credentials, so copied the fixed
+`main.rs` directly rather than provisioning new access; rebuilt in place with
+`~/.cargo/bin`/`~/.radicle/bin` on `PATH`), then actually triggered `blog-deploy.service`:
+
+```
+● blog-deploy.service ... Active: inactive (dead) ...
+Process: ExecStart=/home/blog/repo/deploy/deploy.sh (code=exited, status=0/SUCCESS)
+[blog-deploy] deploying to /srv/mbator.pl...
+[blog-deploy] deploy complete: 3f650d2d7e9accfba3468a885fc63984e18ceadb
+```
+
+Full success, end to end: `git fetch rad` pulled the notes ref for real, `git lfs pull`
+downloaded and decrypted the private object, the site built, and it deployed. Confirmed the
+checked-out asset's SHA-256 matches the original exactly
+(`c5e3b0c1eb2d6e2f3ef98fe74e70fe431986dc2a401b1eae961e175b5a2164ca`). It doesn't appear under
+`/srv/mbator.pl` because it's deliberately unreferenced by any post — expected, by the smoke
+test's own design, not a bug.
