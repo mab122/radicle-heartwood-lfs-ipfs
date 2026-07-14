@@ -1,5 +1,9 @@
 # ❤️🪵
 
+> **Note:** this is a fork of upstream `heartwood` adding Git LFS (large file) support backed
+> by IPFS. See [`LFS-IPFS.md`](LFS-IPFS.md) for what's added and how to set it up; everything
+> below is upstream's own documentation, unchanged.
+
 *Radicle Heartwood Protocol & Stack*
 
 Heartwood is the third iteration of the Radicle Protocol, a powerful
