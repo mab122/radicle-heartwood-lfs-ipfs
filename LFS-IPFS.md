@@ -15,11 +15,8 @@ separates a small, mutable pointer file (which Radicle replicates exactly as it 
 other git object) from immutable large-file content addressed by hash — which is precisely
 what IPFS is good at. This fork only uses IPFS for that second part.
 
-A seed-hosted HTTP LFS server was considered and prototyped first, but rejected: it would have
-recreated a single point of failure, and Radicle's node/address book has no existing mechanism
-to advertise a seed's HTTP endpoint (only P2P gossip addresses), so real seed discovery would
-have needed new protocol work outside this fork's scope. Instead, every peer uses their own
-local IPFS node, and the file-CID mapping travels with the repository itself.
+There's no server anywhere in this design: every peer uses their own local IPFS node, and the
+file-CID mapping travels with the repository itself, avoiding a single point of failure.
 
 ## How it works
 
