@@ -20,7 +20,12 @@ use radicle::git::raw::Repository;
 use crate::terminal as term;
 
 /// Git notes ref under which oid -> CID mappings for LFS objects are stored.
-pub const LFS_NOTES_REF: &str = "refs/notes/rad-lfs";
+///
+/// This is the *local* ref name; readers need to merge across every
+/// fetched peer's copy too (`refs/notes/rad-lfs/<peer>`) -- see
+/// `crate::lfs_crypto::find_envelopes`/`all_note_targets`, which
+/// `lfs_cids` below delegates to.
+pub use crate::lfs_crypto::NOTES_REF as LFS_NOTES_REF;
 
 /// Default HTTP API address of a local Kubo (IPFS) daemon.
 const DEFAULT_KUBO_API_URL: &str = "http://127.0.0.1:5001";
@@ -48,32 +53,22 @@ pub fn check_daemon() -> anyhow::Result<()> {
     }
 }
 
-/// Collect the set of CIDs referenced by LFS notes on [`LFS_NOTES_REF`].
+/// Collect the set of CIDs referenced by LFS notes, across every peer's
+/// notes ref (not just our own — a repo we're seeding may hold objects
+/// whose only note came from someone else's `refs/notes/rad-lfs/<peer>`).
 ///
-/// Returns an empty vector if the notes ref doesn't exist, i.e. the
-/// repository has no LFS objects tracked yet. This is not an error.
+/// Returns an empty vector if no notes exist, i.e. the repository has no
+/// LFS objects tracked yet. This is not an error.
 #[must_use]
 pub fn lfs_cids(repo: &Repository) -> Vec<String> {
-    let notes = match repo.notes(Some(LFS_NOTES_REF)) {
-        Ok(notes) => notes,
-        // The `refs/notes/rad-lfs` ref doesn't exist, which just means
-        // there are no LFS objects tracked for this repository yet.
-        Err(_) => return Vec::new(),
+    let Ok(targets) = crate::lfs_crypto::all_note_targets(repo) else {
+        return Vec::new();
     };
 
     let mut cids = Vec::new();
-    for note in notes {
-        let Ok((_, annotated_id)) = note else {
-            continue;
-        };
-        let Ok(note) = repo.find_note(Some(LFS_NOTES_REF), annotated_id) else {
-            continue;
-        };
-        let Some(message) = note.message() else {
-            continue;
-        };
-        if let Ok(envelope) = serde_json::from_str::<crate::lfs_crypto::Envelope>(message) {
-            cids.push(envelope.cid);
+    for target in targets {
+        if let Ok(found) = crate::lfs_crypto::find_cids(repo, target) {
+            cids.extend(found);
         }
     }
     cids

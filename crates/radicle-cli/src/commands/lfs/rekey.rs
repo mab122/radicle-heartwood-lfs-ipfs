@@ -12,8 +12,7 @@ use radicle::git::raw::Signature;
 use radicle::identity::Did;
 use radicle::storage::{ReadRepository as _, ReadStorage as _};
 
-use crate::ipfs;
-use crate::lfs_crypto::{self, Envelope};
+use crate::lfs_crypto::{self, NOTES_REF};
 use crate::terminal as term;
 
 const NOTE_AUTHOR_NAME: &str = "rad-lfs";
@@ -37,13 +36,15 @@ pub fn run(ctx: impl term::Context) -> anyhow::Result<()> {
     // authorized).
     let current = lfs_crypto::recipients_for(&doc, my_did);
 
-    let notes = match repo.notes(Some(ipfs::LFS_NOTES_REF)) {
-        Ok(notes) => notes,
-        Err(_) => {
-            term::success!("Nothing to rekey: no LFS objects are tracked in this repository yet");
-            return Ok(());
-        }
-    };
+    // Walk every note across every peer's notes ref -- not just the local
+    // one -- since an object's only note may live under a peer we've
+    // fetched from rather than one we wrote ourselves.
+    let targets = lfs_crypto::all_note_targets(&repo)
+        .context("failed to enumerate LFS notes")?;
+    if targets.is_empty() {
+        term::success!("Nothing to rekey: no LFS objects are tracked in this repository yet");
+        return Ok(());
+    }
 
     let signature = Signature::now(NOTE_AUTHOR_NAME, NOTE_AUTHOR_EMAIL)
         .context("failed to construct note signature")?;
@@ -51,24 +52,7 @@ pub fn run(ctx: impl term::Context) -> anyhow::Result<()> {
     let mut rekeyed_objects = 0;
     let mut added_recipients = 0;
 
-    for note in notes {
-        let Ok((_, target_oid)) = note else {
-            continue;
-        };
-        let Ok(note) = repo.find_note(Some(ipfs::LFS_NOTES_REF), target_oid) else {
-            continue;
-        };
-        let Some(message) = note.message() else {
-            continue;
-        };
-        let Ok(mut envelope) = serde_json::from_str::<Envelope>(message) else {
-            continue;
-        };
-        let Some(enc) = envelope.enc.as_mut() else {
-            // Public (unencrypted) object: nothing to rekey.
-            continue;
-        };
-
+    for target_oid in targets {
         // The note only stores the CID and encryption metadata, not the
         // oid/size that were used as HKDF context when wrapping the
         // content key. Recover them losslessly from the pointer blob
@@ -88,58 +72,75 @@ pub fn run(ctx: impl term::Context) -> anyhow::Result<()> {
             continue;
         };
 
-        let cek = match lfs_crypto::unwrap_cek(&enc.recipients, &signer, my_did, &rid, oid) {
-            Ok(cek) => cek,
+        let candidates = match lfs_crypto::find_envelopes(&repo, target_oid) {
+            Ok(candidates) => candidates,
             Err(err) => {
-                term::warning(format!(
-                    "Skipping object with oid {oid}: {err} (you may not have been an authorized \
-                     recipient of this particular object)"
-                ));
+                term::warning(format!("Skipping object with oid {oid}: {err}"));
                 continue;
             }
         };
 
-        let existing: BTreeSet<Did> = enc.recipients.iter().map(|w| w.did).collect();
-        let missing: Vec<Did> = current.difference(&existing).copied().collect();
-        if missing.is_empty() {
-            continue;
-        }
+        // Almost always exactly one candidate; more than one only if two
+        // peers independently encrypted byte-identical content (same
+        // oid/size) producing different ciphertext each time. Rekey
+        // whichever ones we're actually authorized to unwrap -- skip the
+        // rest quietly, they're not our concern.
+        for mut envelope in candidates {
+            let Some(enc) = envelope.enc.as_mut() else {
+                // Public (unencrypted) object: nothing to rekey.
+                continue;
+            };
 
-        let cek_key: chacha20poly1305::Key = (*cek).into();
-        let mut any_added = false;
-        for recipient in &missing {
-            match lfs_crypto::wrap_cek_for(&cek_key, &signer, my_did, recipient, &rid, oid) {
-                Ok(wrapped) => {
-                    enc.recipients.push(wrapped);
-                    added_recipients += 1;
-                    any_added = true;
+            let cek = match lfs_crypto::unwrap_cek(&enc.recipients, &signer, my_did, &rid, oid) {
+                Ok(cek) => cek,
+                Err(_) => {
+                    // Not authorized for *this particular* candidate --
+                    // expected and not worth warning about, since another
+                    // candidate for the same object (or none) may apply.
+                    continue;
                 }
-                Err(err) => {
-                    term::warning(format!(
-                        "Failed to wrap the content key for {recipient} on object with oid \
-                         {oid}: {err}"
-                    ));
+            };
+
+            let existing: BTreeSet<Did> = enc.recipients.iter().map(|w| w.did).collect();
+            let missing: Vec<Did> = current.difference(&existing).copied().collect();
+            if missing.is_empty() {
+                continue;
+            }
+
+            let cek_key: chacha20poly1305::Key = (*cek).into();
+            let mut any_added = false;
+            for recipient in &missing {
+                match lfs_crypto::wrap_cek_for(&cek_key, &signer, my_did, recipient, &rid, oid) {
+                    Ok(wrapped) => {
+                        enc.recipients.push(wrapped);
+                        added_recipients += 1;
+                        any_added = true;
+                    }
+                    Err(err) => {
+                        term::warning(format!(
+                            "Failed to wrap the content key for {recipient} on object with oid \
+                             {oid}: {err}"
+                        ));
+                    }
                 }
             }
+
+            if !any_added {
+                continue;
+            }
+
+            // Always write to our own local ref, regardless of which
+            // peer's ref the original note came from -- once pushed, this
+            // lands under our own namespace and is picked up by others
+            // via the fetch refspec, alongside (not replacing) the
+            // original note.
+            let message = serde_json::to_string(&envelope)
+                .context("failed to serialize LFS note envelope")?;
+            repo.note(&signature, &signature, Some(NOTES_REF), target_oid, &message, true)
+                .context("failed to write LFS note")?;
+
+            rekeyed_objects += 1;
         }
-
-        if !any_added {
-            continue;
-        }
-
-        let message = serde_json::to_string(&envelope)
-            .context("failed to serialize LFS note envelope")?;
-        repo.note(
-            &signature,
-            &signature,
-            Some(ipfs::LFS_NOTES_REF),
-            target_oid,
-            &message,
-            true,
-        )
-        .context("failed to rewrite LFS note")?;
-
-        rekeyed_objects += 1;
     }
 
     if rekeyed_objects == 0 {

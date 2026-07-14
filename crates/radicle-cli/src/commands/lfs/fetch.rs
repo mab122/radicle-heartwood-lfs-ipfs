@@ -8,15 +8,10 @@ use std::path::PathBuf;
 use anyhow::{Context as _, anyhow};
 
 use crate::ipfs;
-use crate::lfs_crypto::{self, Envelope};
+use crate::lfs_crypto;
 use crate::terminal as term;
 
-pub fn run(
-    oid: String,
-    size: i64,
-    out: PathBuf,
-    ctx: impl term::Context,
-) -> anyhow::Result<()> {
+pub fn run(oid: String, size: i64, out: PathBuf, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
     let (repo, rid) = radicle::rad::cwd()
         .context("`rad lfs fetch` must be run inside a Radicle repository working copy")?;
@@ -27,36 +22,40 @@ pub fn run(
         .blob(pointer_text.as_bytes())
         .context("failed to write LFS pointer blob")?;
 
-    let note = repo.find_note(Some(ipfs::LFS_NOTES_REF), blob_oid).map_err(|_| {
-        anyhow!(
+    let candidates = lfs_crypto::find_envelopes(&repo, blob_oid)
+        .with_context(|| format!("failed to read LFS notes for oid {oid}"))?;
+    if candidates.is_empty() {
+        anyhow::bail!(
             "no CID recorded for oid {oid}; the peer that has this object needs to push its \
              {} ref",
-            ipfs::LFS_NOTES_REF
-        )
-    })?;
-    let message = note.message().ok_or_else(|| {
-        anyhow!(
-            "no CID recorded for oid {oid}; the peer that has this object needs to push its \
-             {} ref",
-            ipfs::LFS_NOTES_REF
-        )
-    })?;
-    let envelope: Envelope = serde_json::from_str(message)
-        .with_context(|| format!("failed to parse LFS note for oid {oid}"))?;
+            lfs_crypto::NOTES_REF
+        );
+    }
 
     ipfs::check_daemon()?;
 
-    let bytes = match &envelope.enc {
-        None => ipfs::cat(&envelope.cid)?,
-        Some(enc) => {
-            let ciphertext = ipfs::cat(&envelope.cid)?;
-            let signer = lfs_crypto::load_signer(&profile)?;
-            lfs_crypto::decrypt_with(&ciphertext, enc, &signer, profile.did(), &rid, &oid)?
+    // Almost always exactly one candidate. More than one only happens if
+    // two peers independently encrypted byte-identical content (same
+    // oid/size) producing different ciphertext each time -- try each
+    // until one actually decrypts for us.
+    let mut last_err = None;
+    for envelope in candidates {
+        let result = match &envelope.enc {
+            None => ipfs::cat(&envelope.cid),
+            Some(enc) => ipfs::cat(&envelope.cid).and_then(|ciphertext| {
+                let signer = lfs_crypto::load_signer(&profile)?;
+                lfs_crypto::decrypt_with(&ciphertext, enc, &signer, profile.did(), &rid, &oid)
+            }),
+        };
+        match result {
+            Ok(bytes) => {
+                std::fs::write(&out, bytes)
+                    .with_context(|| format!("failed to write `{}`", out.display()))?;
+                return Ok(());
+            }
+            Err(err) => last_err = Some(err),
         }
-    };
+    }
 
-    std::fs::write(&out, bytes)
-        .with_context(|| format!("failed to write `{}`", out.display()))?;
-
-    Ok(())
+    Err(last_err.unwrap_or_else(|| anyhow!("no CID recorded for oid {oid}")))
 }

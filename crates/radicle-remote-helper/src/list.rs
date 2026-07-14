@@ -32,6 +32,9 @@ pub(super) enum Error {
     /// General repository error.
     #[error(transparent)]
     Repository(#[from] radicle::storage::RepositoryError),
+    /// Refs error.
+    #[error(transparent)]
+    Refs(#[from] radicle::storage::refs::Error),
 }
 
 /// List refs for fetching (`git fetch` and `git ls-remote`).
@@ -72,6 +75,34 @@ pub(super) fn for_fetch<R: ReadRepository + cob::Store<Namespace = NodeId> + 'st
         match patch_refs(profile, stored) {
             Ok(mut refs) => lines.append(&mut refs),
             Err(e) => eprintln!("remote: error listing patch refs: {e}"),
+        }
+
+        // List each peer's `refs/notes/rad-lfs`, individually, under
+        // `refs/notes/rad-lfs/<peer-id>`. Notes are per-peer
+        // contributions -- any peer (not just delegates) can commit an
+        // LFS-tracked file and write a note for it -- so unlike
+        // `refs/heads`/`refs/tags` there is no single canonical value to
+        // resolve here; the reading side merges across every peer's note
+        // for a given object instead (see `radicle-cli`'s
+        // `lfs_crypto::find_envelope`). Do not abort the whole fetch if
+        // this fails, same as patch refs above.
+        match lfs_notes_refs(stored) {
+            Ok(mut refs) => lines.append(&mut refs),
+            Err(e) => eprintln!("remote: error listing LFS notes refs: {e}"),
+        }
+    }
+
+    Ok(lines)
+}
+
+/// List every peer's `refs/notes/rad-lfs`, under `refs/notes/rad-lfs/<peer-id>`.
+fn lfs_notes_refs<R: ReadRepository>(stored: &R) -> Result<Vec<String>, Error> {
+    let mut lines = Vec::new();
+    let notes_ref = git::fmt::qualified!("refs/notes/rad-lfs");
+
+    for (peer, _) in stored.remotes()? {
+        if let Ok(oid) = stored.reference_oid(&peer, &notes_ref) {
+            lines.push(format!("{oid} refs/notes/rad-lfs/{peer}"));
         }
     }
 

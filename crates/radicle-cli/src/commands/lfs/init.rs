@@ -131,11 +131,37 @@ pub fn run() -> anyhow::Result<()> {
         "Configured Git LFS to transfer objects via `{TRANSFER_AGENT_BIN}` (backed by IPFS)"
     );
 
-    let notes_refspec = format!("+{NOTES_REF}:{NOTES_REF}");
-    ensure_refspec(workdir, &format!("remote.{RAD_REMOTE}.push"), &notes_refspec)?;
-    ensure_refspec(workdir, &format!("remote.{RAD_REMOTE}.fetch"), &notes_refspec)?;
+    // Push stays a plain (non-namespaced) refspec: `git push` lands
+    // whatever local ref we push under the pusher's own namespace on the
+    // server side regardless of the ref name used, the same way
+    // `refs/heads/*` does.
+    //
+    // Fetch is different: `refs/notes/rad-lfs` is a per-peer ref (any
+    // peer can commit an LFS-tracked file, not just delegates), so
+    // there's no single canonical value the remote can advertise the way
+    // it does for `refs/heads`/`refs/tags`. The remote instead advertises
+    // every peer's note individually under `refs/notes/rad-lfs/<peer>`,
+    // so the fetch refspec needs a wildcard to pull them all; the LFS
+    // tooling merges across whatever's fetched (see
+    // `lfs_crypto::find_envelope`) rather than expecting one ref.
+    let push_refspec = format!("+{NOTES_REF}:{NOTES_REF}");
+    let fetch_refspec = format!("+{NOTES_REF}/*:{NOTES_REF}/*");
+    let fetch_key = format!("remote.{RAD_REMOTE}.fetch");
+
+    // Migration: earlier versions of `rad lfs init` configured a plain,
+    // non-wildcard fetch refspec for the notes ref, which `git fetch` can
+    // never satisfy -- the remote never advertises a bare
+    // `refs/notes/rad-lfs` (only the wildcarded per-peer form below), so
+    // a stale entry here breaks the *entire* fetch, not just this one
+    // ref. Remove it if present so re-running `rad lfs init` actually
+    // fixes an already-configured repository, rather than leaving the
+    // broken entry alongside the corrected one.
+    remove_refspec_if_present(workdir, &fetch_key, &format!("+{NOTES_REF}:{NOTES_REF}"))?;
+
+    ensure_refspec(workdir, &format!("remote.{RAD_REMOTE}.push"), &push_refspec)?;
+    ensure_refspec(workdir, &fetch_key, &fetch_refspec)?;
     term::success!(
-        "Configured the `{RAD_REMOTE}` remote to push/fetch the `{NOTES_REF}` notes ref"
+        "Configured the `{RAD_REMOTE}` remote to push/fetch the `{NOTES_REF}` notes refs"
     );
 
     install_pre_commit_hook(&repo)?;
@@ -184,6 +210,38 @@ fn ensure_refspec(workdir: &Path, key: &str, value: &str) -> anyhow::Result<()> 
 
     git::git(workdir, ["config", "--add", key, value])
         .with_context(|| format!("failed to set git config `{key}`"))?;
+    Ok(())
+}
+
+/// Remove `value` from the (potentially multi-valued) git config key
+/// `key`, if present, without disturbing any other values under the same
+/// key (e.g. the default `+refs/heads/*:refs/remotes/rad/*` that plain
+/// `git remote add` already configures on `remote.<rad>.fetch`).
+fn remove_refspec_if_present(workdir: &Path, key: &str, value: &str) -> anyhow::Result<()> {
+    let output = radicle::git::run(Some(workdir), ["config", "--get-all", key])
+        .with_context(|| format!("failed to read git config `{key}`"))?;
+    let existing = String::from_utf8_lossy(&output.stdout);
+    if !existing.lines().any(|line| line.trim() == value) {
+        return Ok(());
+    }
+
+    // `git config --unset` matches its value argument as a regex against
+    // the whole existing value, not literally -- anchor and escape so it
+    // removes exactly this one entry and nothing else.
+    let escaped: String = value
+        .chars()
+        .map(|c| {
+            if "\\^$.|?*+()[]{}".contains(c) {
+                format!("\\{c}")
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    let pattern = format!("^{escaped}$");
+
+    git::git(workdir, ["config", "--unset", key, &pattern])
+        .with_context(|| format!("failed to remove stale git config `{key}` entry"))?;
     Ok(())
 }
 

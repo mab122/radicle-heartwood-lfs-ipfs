@@ -213,6 +213,8 @@ after they were added.
 | Large file didn't get pinned (commit went through, but no `rad-lfs` note) | The pre-commit hook silently skips pinning if the `ipfs`/`rad` CLIs aren't on `PATH` — check `command -v ipfs` / `command -v rad`. Re-add the file and commit again once available. |
 | `private-repo LFS operations need to perform a key-agreement (ECDH) operation ... Set RAD_PASSPHRASE` | Your keystore is encrypted and no passphrase is available (an ssh-agent-only signer can't do key agreement). Set `RAD_PASSPHRASE` in the environment the commit/fetch runs in, or use an unencrypted keystore. |
 | `you are not an authorized recipient of this object` | Either genuinely unauthorized (not a delegate/allow-listed DID for this private repo), or authorized *after* this specific object was committed and nobody has run `rad lfs rekey` since — ask an already-authorized collaborator to run it and push. |
+| `fatal: couldn't find remote ref refs/notes/rad-lfs` on `git fetch`/`git pull` (breaks *all* fetching, not just LFS) | Fixed — but if this repo had `rad lfs init` run against an older build, re-run `rad lfs init` once to replace the stale, now-invalid fetch refspec it configured (see `NOTES-lfs-notes-fetch-bug.md` for the full story). |
+| Plain `git push rad` (no branch name) doesn't push your commits, only the notes ref | Known, separate quirk: once any explicit push refspec is configured (which `rad lfs init` does), git stops falling back to pushing the current branch by default. Always push explicitly: `git push rad <branch>`. |
 
 ## Status
 

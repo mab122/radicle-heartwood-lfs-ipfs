@@ -23,6 +23,7 @@ use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use cyphernet::Ecdh;
 use hkdf::Hkdf;
 use radicle::Profile;
+use radicle::git::raw::{Oid, Repository};
 use radicle::identity::{Did, Doc, RepoId, Visibility};
 use radicle_crypto::ssh::keystore::MemorySigner;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,15 @@ use zeroize::Zeroizing;
 pub const ENVELOPE_VERSION: u32 = 1;
 const HKDF_DOMAIN: &[u8] = b"radicle-lfs-wrap-v1";
 const ALG: &str = "xchacha20poly1305";
+
+/// The local, not-yet-pushed note ref -- `rad lfs store`/`rekey` always
+/// write here. Once pushed, this lands in the pusher's own namespace on
+/// the server, and `rad lfs init`'s fetch refspec pulls every peer's copy
+/// back down under `refs/notes/rad-lfs/<peer>` (see
+/// `crates/radicle-remote-helper/src/list.rs`'s `lfs_notes_refs`).
+pub const NOTES_REF: &str = "refs/notes/rad-lfs";
+/// Glob matching the local ref above plus every fetched peer ref.
+const NOTES_REF_GLOB: &str = "refs/notes/rad-lfs*";
 
 /// Note content stored on `refs/notes/rad-lfs`, replacing the earlier
 /// bare `cid=<cid>` text. `enc` is `None` for public repos (plain
@@ -262,4 +272,94 @@ pub fn decrypt_with(
     cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| anyhow!("content decryption failed -- wrong key or corrupted data"))
+}
+
+/// Finds every distinct envelope recorded for `blob_oid`, across the
+/// local `refs/notes/rad-lfs` ref and every fetched peer ref under
+/// `refs/notes/rad-lfs/<peer>`. Notes are per-peer contributions -- any
+/// peer can commit an LFS-tracked file, not just delegates -- so more
+/// than one peer's note can exist for the same object, e.g. after a
+/// `rad lfs rekey` that added recipients under a different peer's
+/// namespace than the original committer.
+///
+/// Notes sharing the same `cid` are the *same* encrypted object (rekey
+/// never changes the ciphertext, only adds wrapped-key entries for it),
+/// so their recipient lists are safely unioned together. Notes with
+/// *different* `cid`s (which can only happen if two peers independently
+/// encrypted byte-identical plaintext -- same oid/size, since that's
+/// what determines the pointer blob -- producing different ciphertext
+/// each time since encryption uses a fresh random key/nonce) are kept as
+/// separate candidates, since a wrapped-key entry from one is only valid
+/// against its own ciphertext, never the other's. Callers that need to
+/// decrypt should try each returned candidate in turn.
+pub fn find_envelopes(repo: &Repository, blob_oid: Oid) -> anyhow::Result<Vec<Envelope>> {
+    let mut by_cid: Vec<Envelope> = Vec::new();
+
+    for name in notes_ref_names(repo)? {
+        let Ok(note) = repo.find_note(Some(&name), blob_oid) else {
+            continue;
+        };
+        let Some(message) = note.message() else {
+            continue;
+        };
+        let Ok(envelope) = serde_json::from_str::<Envelope>(message) else {
+            continue;
+        };
+
+        match by_cid.iter_mut().find(|e| e.cid == envelope.cid) {
+            Some(existing) => merge_recipients(existing, envelope),
+            None => by_cid.push(envelope),
+        }
+    }
+
+    Ok(by_cid)
+}
+
+/// Convenience wrapper for callers that only need the set of distinct
+/// CIDs recorded for `blob_oid` (e.g. seed/unseed pinning, which needs
+/// no key material and doesn't care about recipients at all).
+pub fn find_cids(repo: &Repository, blob_oid: Oid) -> anyhow::Result<Vec<String>> {
+    Ok(find_envelopes(repo, blob_oid)?
+        .into_iter()
+        .map(|e| e.cid)
+        .collect())
+}
+
+fn merge_recipients(into: &mut Envelope, other: Envelope) {
+    let (Some(into_enc), Some(other_enc)) = (into.enc.as_mut(), other.enc) else {
+        return;
+    };
+    let existing: BTreeSet<Did> = into_enc.recipients.iter().map(|w| w.did).collect();
+    into_enc
+        .recipients
+        .extend(other_enc.recipients.into_iter().filter(|w| !existing.contains(&w.did)));
+}
+
+/// Every distinct blob oid that has at least one note recorded against it,
+/// across every notes ref (local plus every fetched peer). Used by
+/// `rad lfs rekey` to walk every known LFS object, since a single
+/// `notes()` call on one ref would now miss objects whose only note lives
+/// under a different peer's ref.
+pub fn all_note_targets(repo: &Repository) -> anyhow::Result<BTreeSet<Oid>> {
+    let mut targets = BTreeSet::new();
+    for name in notes_ref_names(repo)? {
+        let Ok(notes) = repo.notes(Some(&name)) else {
+            continue;
+        };
+        for (_, target_oid) in notes.flatten() {
+            targets.insert(target_oid);
+        }
+    }
+    Ok(targets)
+}
+
+fn notes_ref_names(repo: &Repository) -> anyhow::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for reference in repo.references_glob(NOTES_REF_GLOB)? {
+        let reference = reference?;
+        if let Some(name) = reference.name() {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
 }
