@@ -259,6 +259,25 @@ explicit `+refs/heads/*:refs/remotes/rad/*`-equivalent push default is present, 
 "always `git push rad <branch>` explicitly" as a hard requirement), but out of scope for this
 specific fetch-bug fix.
 
+## Post-verification cleanup (2026-07-14, later still)
+
+VPS only needs the compiled binaries, not a persistent build environment. After confirming
+`/home/blog/.radicle/bin/{rad,radicle-node,git-remote-rad,rad-lfs-transfer}` are correct and
+working (live deploy already succeeded, see above), removed the source checkout and Rust
+toolchain to reclaim disk: `rm -rf /home/blog/radicle-heartwood-lfs /home/blog/.rustup
+/home/blog/.cargo`, plus dropped the now-dangling `. "$HOME/.cargo/env"` lines from
+`blog`'s `.bashrc`/`.profile`. Reclaimed ~3.2GB (9.7G → 6.5G used on `/`). Confirmed no
+systemd unit referenced the source dir or cargo/rustup, and the binaries are dynamically
+linked only against standard system libs (`ldd` shows just `libgcc_s`/`libm`/`libc`) — fine
+to run standalone.
+
+**Implication for next time a rebuild is needed**: the VPS has no source checkout or Rust
+toolchain anymore. Re-deploying a new fix means redoing the copy-source-and-build steps
+from scratch (or, better, sorting out `blog`'s lack of Forgejo SSH credentials so it can
+`git clone`/`pull` properly instead of the source being hand-copied in — see Part 1 of Bug
+#2 below for why that copy-instead-of-clone approach already caused one bit of git-history
+drift).
+
 ## Root cause of Bug #2, actually found (2026-07-14, same day, later)
 
 Got shell access to the VPS (`ssh mbator.pl`, passwordless sudo in a real tty) and reproduced

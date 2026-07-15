@@ -34,14 +34,40 @@ pub const ENVELOPE_VERSION: u32 = 1;
 const HKDF_DOMAIN: &[u8] = b"radicle-lfs-wrap-v1";
 const ALG: &str = "xchacha20poly1305";
 
-/// The local, not-yet-pushed note ref -- `rad lfs store`/`rekey` always
-/// write here. Once pushed, this lands in the pusher's own namespace on
-/// the server, and `rad lfs init`'s fetch refspec pulls every peer's copy
-/// back down under `refs/notes/rad-lfs/<peer>` (see
-/// `crates/radicle-remote-helper/src/list.rs`'s `lfs_notes_refs`).
+/// The canonical, bare notes ref name. This is what the *remote* uses --
+/// it's the push destination (lands in the pusher's own namespace on the
+/// server regardless of the local source ref, same as `refs/heads/*`) and
+/// what `crates/radicle-remote-helper/src/list.rs`'s `lfs_notes_refs`
+/// looks for within each peer's namespace server-side.
+///
+/// It is deliberately **not** used as a local write target anymore (see
+/// [`LOCAL_NOTES_REF`]): `rad lfs init`'s fetch refspec populates
+/// `refs/notes/rad-lfs/<peer>` siblings locally, including our own peer's
+/// copy fetched back after a push. A bare `refs/notes/rad-lfs` ref
+/// coexisting with `refs/notes/rad-lfs/<peer>` is a git ref D/F
+/// (file-vs-directory) conflict -- `refs/notes/rad-lfs` can't
+/// simultaneously be a leaf ref and a directory prefix in the same ref
+/// namespace -- which made every `rad lfs store` call after the first
+/// fetch fail outright with "failed to write LFS note".
 pub const NOTES_REF: &str = "refs/notes/rad-lfs";
-/// Glob matching the local ref above plus every fetched peer ref.
+/// The local, not-yet-pushed note ref -- `rad lfs store`/`rekey` write
+/// here instead of the bare [`NOTES_REF`], specifically to avoid the D/F
+/// conflict above: living under the same `refs/notes/rad-lfs/` prefix as
+/// every fetched peer ref means it's just another sibling leaf ref, never
+/// a conflicting directory/file pair. `rad lfs init`'s push refspec maps
+/// this local name to the bare [`NOTES_REF`] on the remote.
+pub const LOCAL_NOTES_REF: &str = "refs/notes/rad-lfs/local";
+/// Glob matching [`LOCAL_NOTES_REF`] and every fetched peer ref, plus (for
+/// backward compatibility while any not-yet-migrated repo or peer might
+/// still have one) the legacy bare [`NOTES_REF`] itself, purely for
+/// reading -- nothing writes there anymore.
 const NOTES_REF_GLOB: &str = "refs/notes/rad-lfs*";
+
+/// Committer identity used for `refs/notes/rad-lfs/*` notes. There's no
+/// natural "author" for a note that just records a CID, so a fixed
+/// identity is used everywhere a note gets written.
+pub const NOTE_AUTHOR_NAME: &str = "rad-lfs";
+pub const NOTE_AUTHOR_EMAIL: &str = "rad-lfs@localhost";
 
 /// Note content stored on `refs/notes/rad-lfs`, replacing the earlier
 /// bare `cid=<cid>` text. `enc` is `None` for public repos (plain

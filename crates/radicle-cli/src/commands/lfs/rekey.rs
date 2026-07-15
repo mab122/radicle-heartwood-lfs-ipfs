@@ -12,11 +12,8 @@ use radicle::git::raw::Signature;
 use radicle::identity::Did;
 use radicle::storage::{ReadRepository as _, ReadStorage as _};
 
-use crate::lfs_crypto::{self, NOTES_REF};
+use crate::lfs_crypto::{self, LOCAL_NOTES_REF, NOTE_AUTHOR_EMAIL, NOTE_AUTHOR_NAME};
 use crate::terminal as term;
-
-const NOTE_AUTHOR_NAME: &str = "rad-lfs";
-const NOTE_AUTHOR_EMAIL: &str = "rad-lfs@localhost";
 
 pub fn run(ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
@@ -136,7 +133,7 @@ pub fn run(ctx: impl term::Context) -> anyhow::Result<()> {
             // original note.
             let message = serde_json::to_string(&envelope)
                 .context("failed to serialize LFS note envelope")?;
-            repo.note(&signature, &signature, Some(NOTES_REF), target_oid, &message, true)
+            repo.note(&signature, &signature, Some(LOCAL_NOTES_REF), target_oid, &message, true)
                 .context("failed to write LFS note")?;
 
             rekeyed_objects += 1;

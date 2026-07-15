@@ -19,6 +19,7 @@ use radicle::git::raw::Repository;
 
 use crate::git;
 use crate::ipfs::{self, LFS_NOTES_REF as NOTES_REF};
+use crate::lfs_crypto::{LOCAL_NOTES_REF, NOTE_AUTHOR_EMAIL, NOTE_AUTHOR_NAME};
 use crate::terminal as term;
 
 /// Name under which our custom transfer agent is registered with Git LFS.
@@ -131,10 +132,15 @@ pub fn run() -> anyhow::Result<()> {
         "Configured Git LFS to transfer objects via `{TRANSFER_AGENT_BIN}` (backed by IPFS)"
     );
 
-    // Push stays a plain (non-namespaced) refspec: `git push` lands
-    // whatever local ref we push under the pusher's own namespace on the
-    // server side regardless of the ref name used, the same way
-    // `refs/heads/*` does.
+    // Push maps our *local-only* notes ref (`LOCAL_NOTES_REF`) to the bare
+    // `NOTES_REF` on the remote: `git push` lands whatever local ref we
+    // push under the pusher's own namespace on the server regardless of
+    // the local ref name, the same way `refs/heads/*` does, so the
+    // destination staying bare is correct and matches what
+    // `list.rs`'s `lfs_notes_refs` looks for server-side. The *source*
+    // is deliberately not the bare name too -- see `LOCAL_NOTES_REF`'s
+    // doc comment for why (a git ref D/F conflict with fetched peer
+    // refs).
     //
     // Fetch is different: `refs/notes/rad-lfs` is a per-peer ref (any
     // peer can commit an LFS-tracked file, not just delegates), so
@@ -144,8 +150,9 @@ pub fn run() -> anyhow::Result<()> {
     // so the fetch refspec needs a wildcard to pull them all; the LFS
     // tooling merges across whatever's fetched (see
     // `lfs_crypto::find_envelope`) rather than expecting one ref.
-    let push_refspec = format!("+{NOTES_REF}:{NOTES_REF}");
+    let push_refspec = format!("+{LOCAL_NOTES_REF}:{NOTES_REF}");
     let fetch_refspec = format!("+{NOTES_REF}/*:{NOTES_REF}/*");
+    let push_key = format!("remote.{RAD_REMOTE}.push");
     let fetch_key = format!("remote.{RAD_REMOTE}.fetch");
 
     // Migration: earlier versions of `rad lfs init` configured a plain,
@@ -157,12 +164,18 @@ pub fn run() -> anyhow::Result<()> {
     // fixes an already-configured repository, rather than leaving the
     // broken entry alongside the corrected one.
     remove_refspec_if_present(workdir, &fetch_key, &format!("+{NOTES_REF}:{NOTES_REF}"))?;
+    // Migration: earlier versions also pushed from the bare local ref
+    // (symmetric `+refs/notes/rad-lfs:refs/notes/rad-lfs`). Replace it
+    // with the corrected asymmetric refspec above.
+    remove_refspec_if_present(workdir, &push_key, &format!("+{NOTES_REF}:{NOTES_REF}"))?;
 
-    ensure_refspec(workdir, &format!("remote.{RAD_REMOTE}.push"), &push_refspec)?;
+    ensure_refspec(workdir, &push_key, &push_refspec)?;
     ensure_refspec(workdir, &fetch_key, &fetch_refspec)?;
     term::success!(
         "Configured the `{RAD_REMOTE}` remote to push/fetch the `{NOTES_REF}` notes refs"
     );
+
+    migrate_local_notes_ref(&repo)?;
 
     install_pre_commit_hook(&repo)?;
     term::success!("Installed the `rad-lfs` pre-commit hook");
@@ -242,6 +255,61 @@ fn remove_refspec_if_present(workdir: &Path, key: &str, value: &str) -> anyhow::
 
     git::git(workdir, ["config", "--unset", key, &pattern])
         .with_context(|| format!("failed to remove stale git config `{key}` entry"))?;
+    Ok(())
+}
+
+/// Migration: earlier versions of this fork wrote local notes directly to
+/// the bare `NOTES_REF` (`refs/notes/rad-lfs`). Since the fetch refspec
+/// populates `refs/notes/rad-lfs/<peer>` siblings locally -- including our
+/// own peer's copy, fetched back after a push -- a leftover bare ref
+/// causes a git ref D/F (file-vs-directory) conflict: `refs/notes/rad-lfs`
+/// can't simultaneously be a leaf ref and a directory prefix for
+/// `refs/notes/rad-lfs/<peer>` in the same namespace. That made every
+/// `rad lfs store`/`rad lfs rekey` call after the first fetch fail
+/// outright with "failed to write LFS note".
+///
+/// If a bare `refs/notes/rad-lfs` ref exists, copy its notes into
+/// `LOCAL_NOTES_REF` (so nothing already recorded there is lost) and
+/// delete the bare ref, eliminating the conflict. A no-op if the bare ref
+/// doesn't exist (fresh setups, or a repo that's already been migrated).
+fn migrate_local_notes_ref(repo: &Repository) -> anyhow::Result<()> {
+    let Ok(mut reference) = repo.find_reference(NOTES_REF) else {
+        return Ok(());
+    };
+
+    // Read every note out *before* touching anything -- writing to
+    // `LOCAL_NOTES_REF` while the bare `NOTES_REF` still exists is the
+    // exact same D/F conflict this migration exists to fix, just
+    // self-inflicted. The bare ref has to be gone first.
+    let mut migrated = Vec::new();
+    if let Ok(notes) = repo.notes(Some(NOTES_REF)) {
+        for (_, target_oid) in notes.flatten() {
+            if let Ok(note) = repo.find_note(Some(NOTES_REF), target_oid)
+                && let Some(message) = note.message()
+            {
+                migrated.push((target_oid, message.to_string()));
+            }
+        }
+    }
+
+    reference
+        .delete()
+        .context("failed to remove the legacy bare `refs/notes/rad-lfs` ref")?;
+
+    if migrated.is_empty() {
+        return Ok(());
+    }
+
+    let signature = radicle::git::raw::Signature::now(NOTE_AUTHOR_NAME, NOTE_AUTHOR_EMAIL)
+        .context("failed to construct note signature")?;
+    for (target_oid, message) in migrated {
+        repo.note(&signature, &signature, Some(LOCAL_NOTES_REF), target_oid, &message, true)
+            .with_context(|| {
+                format!("failed to migrate note for {target_oid} to `{LOCAL_NOTES_REF}`")
+            })?;
+    }
+    term::success!("Migrated local LFS notes from the legacy `{NOTES_REF}` ref");
+
     Ok(())
 }
 

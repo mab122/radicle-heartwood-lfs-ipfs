@@ -11,15 +11,8 @@ use radicle::git::raw::Signature;
 use radicle::storage::{ReadRepository as _, ReadStorage as _};
 
 use crate::ipfs;
-use crate::lfs_crypto::{self, Envelope};
+use crate::lfs_crypto::{self, Envelope, LOCAL_NOTES_REF, NOTE_AUTHOR_EMAIL, NOTE_AUTHOR_NAME};
 use crate::terminal as term;
-
-/// Committer identity used for the `refs/notes/rad-lfs` notes this command
-/// writes. There's no natural "author" for a note that just records a
-/// CID, so a fixed identity is used, matching the shell version of this
-/// logic in the `rad lfs init`-installed pre-commit hook.
-const NOTE_AUTHOR_NAME: &str = "rad-lfs";
-const NOTE_AUTHOR_EMAIL: &str = "rad-lfs@localhost";
 
 pub fn run(oid: String, size: i64, path: PathBuf, ctx: impl term::Context) -> anyhow::Result<()> {
     let profile = ctx.profile()?;
@@ -63,15 +56,8 @@ pub fn run(oid: String, size: i64, path: PathBuf, ctx: impl term::Context) -> an
         serde_json::to_string(&envelope).context("failed to serialize LFS note envelope")?;
     let signature = Signature::now(NOTE_AUTHOR_NAME, NOTE_AUTHOR_EMAIL)
         .context("failed to construct note signature")?;
-    repo.note(
-        &signature,
-        &signature,
-        Some(ipfs::LFS_NOTES_REF),
-        blob_oid,
-        &message,
-        true,
-    )
-    .context("failed to write LFS note")?;
+    repo.note(&signature, &signature, Some(LOCAL_NOTES_REF), blob_oid, &message, true)
+        .context("failed to write LFS note")?;
 
     term::println(cid);
 
