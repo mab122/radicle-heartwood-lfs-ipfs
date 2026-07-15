@@ -46,4 +46,9 @@ pub enum Command {
     /// Grant newly-authorized collaborators access to previously-encrypted
     /// LFS objects
     Rekey,
+    /// Store every staged LFS file's content in IPFS in one batch (invoked
+    /// by the pre-commit hook; not for interactive use). Reads
+    /// "<oid> <size> <path>" lines from stdin.
+    #[command(hide = true)]
+    Precommit,
 }

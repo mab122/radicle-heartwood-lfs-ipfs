@@ -42,18 +42,24 @@ const HOOK_END: &str = "# <<< rad-lfs-init managed pre-commit hook <<<";
 /// Body of the managed pre-commit hook block (POSIX `sh`).
 ///
 /// For every file staged in the commit that's tracked by Git LFS (i.e.
-/// matches a `filter=lfs` pattern in `.gitattributes`), this:
-///  1. computes the file's LFS oid (sha256) and size, and
-///  2. shells out to `rad lfs store` with those values, which does the
-///     actual IPFS add/pin (encrypting first for private repos) and writes
-///     the corresponding note on `refs/notes/rad-lfs` itself.
+/// matches a `filter=lfs` pattern in `.gitattributes`), this computes the
+/// file's LFS oid (sha256) and size, then feeds all of them to a single
+/// `rad lfs precommit` invocation as "<oid> <size> <path>" lines on stdin.
+/// `rad lfs precommit` does the actual IPFS add/pin (encrypting first for
+/// private repos) and writes the corresponding notes on `refs/notes/rad-lfs`
+/// itself — see `commands/lfs/precommit.rs` and `commands/lfs/store.rs`.
+///
+/// Batching into one `rad` process (rather than one per file) matters for
+/// private repos specifically: each file needs the keystore passphrase for
+/// an ECDH key-agreement operation, and a separate process per file meant a
+/// separate passphrase prompt per file. One process loads it once.
 ///
 /// The hook only computes the cheap, dependency-free oid/size values in
-/// shell; the CID/encryption/git-notes logic lives in `rad lfs store`
-/// (see `commands/lfs/store.rs`) since it needs access to the repo's
-/// identity/visibility and (for private repos) key material that a plain
-/// shell script has no business handling — a git hook shelling out to our
-/// own `rad` binary is far simpler than reimplementing that here.
+/// shell; the CID/encryption/git-notes logic lives in `rad lfs precommit`
+/// since it needs access to the repo's identity/visibility and (for private
+/// repos) key material that a plain shell script has no business handling —
+/// a git hook shelling out to our own `rad` binary is far simpler than
+/// reimplementing that here.
 ///
 /// Requires both `ipfs` and `rad` to be available on `PATH` at commit time.
 const HOOK_BODY: &str = r#"rad_lfs_precommit() {
@@ -75,6 +81,7 @@ const HOOK_BODY: &str = r#"rad_lfs_precommit() {
     }
 
     staged=$(mktemp) || return 1
+    batch=$(mktemp) || { rm -f "$staged"; return 1; }
     git diff --cached --name-only --diff-filter=ACM > "$staged"
 
     while IFS= read -r file; do
@@ -84,17 +91,21 @@ const HOOK_BODY: &str = r#"rad_lfs_precommit() {
         attr=$(git check-attr filter -- "$file" | sed -n 's/.*: filter: //p')
         [ "$attr" = "lfs" ] || continue
 
-        oid=$(sha256 "$file") || { rm -f "$staged"; exit 1; }
+        oid=$(sha256 "$file") || { rm -f "$staged" "$batch"; exit 1; }
         size=$(wc -c < "$file" | tr -d ' ')
 
-        rad lfs store --oid "$oid" --size "$size" -- "$file" >/dev/null || {
-            echo "rad-lfs: 'rad lfs store' failed for $file" >&2
-            rm -f "$staged"
+        printf '%s %s %s\n' "$oid" "$size" "$file" >> "$batch"
+    done < "$staged"
+    rm -f "$staged"
+
+    if [ -s "$batch" ]; then
+        rad lfs precommit < "$batch" || {
+            echo "rad-lfs: 'rad lfs precommit' failed" >&2
+            rm -f "$batch"
             exit 1
         }
-    done < "$staged"
-
-    rm -f "$staged"
+    fi
+    rm -f "$batch"
 }
 
 rad_lfs_precommit"#;

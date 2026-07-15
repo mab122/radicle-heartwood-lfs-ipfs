@@ -2,6 +2,7 @@
 
 pub mod fetch;
 pub mod init;
+pub mod precommit;
 pub mod rekey;
 pub mod store;
 
@@ -18,5 +19,6 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         Command::Store { oid, size, path } => self::store::run(oid, size, path, ctx),
         Command::Fetch { oid, size, out } => self::fetch::run(oid, size, out, ctx),
         Command::Rekey => self::rekey::run(ctx),
+        Command::Precommit => self::precommit::run(ctx),
     }
 }

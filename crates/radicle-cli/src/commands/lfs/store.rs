@@ -3,12 +3,16 @@
 //! to the local IPFS (Kubo) node, encrypting it first if the repository
 //! is private.
 
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
 
-use radicle::git::raw::Signature;
+use radicle::Profile;
+use radicle::git::raw::{Repository, Signature};
+use radicle::identity::{Doc, RepoId};
 use radicle::storage::{ReadRepository as _, ReadStorage as _};
+use radicle_crypto::ssh::keystore::MemorySigner;
 
 use crate::ipfs;
 use crate::lfs_crypto::{self, Envelope, LOCAL_NOTES_REF, NOTE_AUTHOR_EMAIL, NOTE_AUTHOR_NAME};
@@ -20,6 +24,29 @@ pub fn run(oid: String, size: i64, path: PathBuf, ctx: impl term::Context) -> an
         .context("`rad lfs store` must be run inside a Radicle repository working copy")?;
     let doc = profile.storage.repository(rid)?.identity_doc()?.doc;
 
+    let mut signer = None;
+    let cid = store_object(&profile, &repo, rid, &doc, &oid, size, &path, &mut signer)?;
+    term::println(cid);
+
+    Ok(())
+}
+
+/// Stores one LFS object's content in IPFS (encrypting first for private
+/// repos) and records the resulting CID as a git note. Factored out of
+/// [`run`] so `rad lfs precommit` can process every staged LFS file in a
+/// single process, loading (and prompting for) the signer at most once
+/// across the whole batch instead of once per file.
+#[allow(clippy::too_many_arguments)]
+pub fn store_object(
+    profile: &Profile,
+    repo: &Repository,
+    rid: RepoId,
+    doc: &Doc,
+    oid: &str,
+    size: i64,
+    path: &Path,
+    signer: &mut Option<MemorySigner>,
+) -> anyhow::Result<String> {
     let pointer_text =
         format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n");
     let blob_oid = repo
@@ -29,19 +56,22 @@ pub fn run(oid: String, size: i64, path: PathBuf, ctx: impl term::Context) -> an
     ipfs::check_daemon()?;
 
     let envelope = if doc.visibility().is_public() {
-        let bytes = std::fs::read(&path)
+        let bytes = std::fs::read(path)
             .with_context(|| format!("failed to read `{}`", path.display()))?;
         let cid = ipfs::add(&bytes)?;
         let _ = ipfs::pin_all(std::slice::from_ref(&cid));
         Envelope::plain(cid)
     } else {
-        let signer = lfs_crypto::load_signer(&profile)?;
+        if signer.is_none() {
+            *signer = Some(lfs_crypto::load_signer(profile)?);
+        }
+        let signer = signer.as_ref().expect("just populated above");
         let sender_did = profile.did();
-        let recipients = lfs_crypto::recipients_for(&doc, sender_did);
-        let plaintext = std::fs::read(&path)
+        let recipients = lfs_crypto::recipients_for(doc, sender_did);
+        let plaintext = std::fs::read(path)
             .with_context(|| format!("failed to read `{}`", path.display()))?;
         let (ciphertext, enc) =
-            lfs_crypto::encrypt_for(&plaintext, &signer, sender_did, &rid, &oid, &recipients)?;
+            lfs_crypto::encrypt_for(&plaintext, signer, sender_did, &rid, oid, &recipients)?;
         let cid = ipfs::add(&ciphertext)?;
         let _ = ipfs::pin_all(std::slice::from_ref(&cid));
         Envelope {
@@ -59,7 +89,5 @@ pub fn run(oid: String, size: i64, path: PathBuf, ctx: impl term::Context) -> an
     repo.note(&signature, &signature, Some(LOCAL_NOTES_REF), blob_oid, &message, true)
         .context("failed to write LFS note")?;
 
-    term::println(cid);
-
-    Ok(())
+    Ok(cid)
 }
