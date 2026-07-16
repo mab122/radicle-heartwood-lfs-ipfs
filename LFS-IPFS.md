@@ -37,12 +37,15 @@ file-CID mapping travels with the repository itself, avoiding a single point of 
   content first if the repository is private (see below). Batched into one call (rather than one
   `rad lfs store` call per file) specifically so a private repo's passphrase is only prompted
   for once per commit, not once per file.
-- **On push**: committing writes the note locally, but pushing it to the remote is a **separate
-  step** from pushing your commit — `rad lfs init` only configures a push refspec for the notes
-  ref, not the branch, so after committing you need both `git push rad <branch>` (your commit)
-  and a bare `git push rad` (the notes mapping). See [Troubleshooting](#troubleshooting) below;
-  this is the single most common way to end up with content that looks committed but that a
-  collaborator can't fetch.
+- **On push**: `rad lfs init` configures `remote.rad.push` with *two* refspecs -- one for your
+  branches (`+refs/heads/*:refs/heads/*`), one for the notes mapping
+  (`+refs/notes/rad-lfs/local:refs/notes/rad-lfs`) -- so a single bare `git push rad` pushes
+  your commit and its notes mapping together. This wasn't always true: earlier builds only configured the notes
+  refspec, so a bare `git push rad` silently pushed *only* the mapping, leaving the commit
+  itself unpushed -- the single most common way to end up with content that looks committed but
+  that a collaborator can't fetch (`no CID recorded for oid ...`). Fixed, but only takes effect
+  once `rad lfs init` has been (re-)run with a build that includes the fix -- see
+  [Troubleshooting](#troubleshooting) below if you're still seeing the old behavior.
 - **The actual bytes** move through [`rad-lfs-transfer`][rad-lfs-transfer], a Git LFS custom
   transfer agent invoked automatically by `git`/`git-lfs` during a push or checkout — see that
   repo for details. It's a separate binary/repository since it has nothing Radicle-specific in
@@ -191,8 +194,7 @@ git lfs track "*.psd"          # or whatever large-file patterns you need
 git add .gitattributes
 git add my-large-file.psd
 git commit -m "Add asset"      # pre-commit hook pins it to IPFS and records the CID here
-git push rad <branch>          # pushes your commit
-git push rad                   # pushes the refs/notes/rad-lfs mapping (separate step -- see the push gotcha below)
+git push rad                   # pushes your commit(s) and the refs/notes/rad-lfs mapping together
 ```
 
 Someone else cloning the same repository:
@@ -238,8 +240,8 @@ previously-committed LFS objects too, not just ones committed after they were ad
 | `private-repo LFS operations need to perform a key-agreement (ECDH) operation ...` | Your keystore is encrypted, ssh-agent can't do key agreement (protocol limitation), and no passphrase is available — normally you'd just be prompted interactively; this only happens in a non-interactive context (no TTY, e.g. CI). Set `RAD_PASSPHRASE`, or use an unencrypted keystore, or run it from a terminal. |
 | `you are not an authorized recipient of this object` | Either genuinely unauthorized (not a delegate/allow-listed DID for this private repo), or authorized *after* this specific object was committed and nobody has run `rad lfs rekey` since — ask an already-authorized collaborator to run it and push. |
 | `fatal: couldn't find remote ref refs/notes/rad-lfs` on `git fetch`/`git pull` (breaks *all* fetching, not just LFS) | Fixed — but if this repo had `rad lfs init` run against an older build, re-run `rad lfs init` once to replace the stale, now-invalid fetch refspec it configured (see `NOTES-lfs-notes-fetch-bug.md` for the full story). |
-| Plain `git push rad` (no branch name) doesn't push your commits, only the notes ref | Expected: `rad lfs init` only configures a push refspec for `refs/notes/rad-lfs`, not the branch — so `git push rad <branch>` and bare `git push rad` each push only what their own refspec covers. After committing an LFS-tracked file, run **both**: `git push rad <branch>` for the commit, then `git push rad` for the notes mapping. |
-| Collaborator gets `no CID recorded for oid ...; the peer that has this object needs to push its refs/notes/rad-lfs ref` even though they can see your commit | You (or whoever committed the LFS file) pushed the branch but forgot the follow-up bare `git push rad` — see the row above. Push it, then have them `git fetch rad` (or re-clone/re-pull). |
+| Plain `git push rad` (no branch name) doesn't push your commits, only the notes ref | Your repository was set up with an older build: `rad lfs init` used to only configure a push refspec for `refs/notes/rad-lfs`, not the branch, so a bare push covered only that. Fixed — re-run `rad lfs init` once (harmless, idempotent) to add the missing `+refs/heads/*:refs/heads/*` push refspec, then a bare `git push rad` pushes both together. Until then, push both explicitly: `git push rad <branch>` for the commit, then `git push rad` for the notes mapping. |
+| Collaborator gets `no CID recorded for oid ...; the peer that has this object needs to push its refs/notes/rad-lfs ref` even though they can see your commit | You (or whoever committed the LFS file) pushed from a repository still missing the branch push refspec — see the row above. Re-run `rad lfs init`, push again, then have them `git fetch rad` (or re-clone/re-pull). |
 
 ## Status
 

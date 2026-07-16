@@ -167,7 +167,7 @@ pub fn run() -> anyhow::Result<()> {
     // so the fetch refspec needs a wildcard to pull them all; the LFS
     // tooling merges across whatever's fetched (see
     // `lfs_crypto::find_envelope`) rather than expecting one ref.
-    let push_refspec = format!("+{LOCAL_NOTES_REF}:{NOTES_REF}");
+    let notes_push_refspec = format!("+{LOCAL_NOTES_REF}:{NOTES_REF}");
     let fetch_refspec = format!("+{NOTES_REF}/*:{NOTES_REF}/*");
     let push_key = format!("remote.{RAD_REMOTE}.push");
     let fetch_key = format!("remote.{RAD_REMOTE}.fetch");
@@ -186,10 +186,27 @@ pub fn run() -> anyhow::Result<()> {
     // with the corrected asymmetric refspec above.
     remove_refspec_if_present(workdir, &push_key, &format!("+{NOTES_REF}:{NOTES_REF}"))?;
 
-    ensure_refspec(workdir, &push_key, &push_refspec)?;
+    ensure_refspec(workdir, &push_key, &notes_push_refspec)?;
     ensure_refspec(workdir, &fetch_key, &fetch_refspec)?;
+
+    // As soon as *any* explicit push refspec is configured on a remote
+    // (the notes one above), git stops falling back to its usual
+    // push.default-driven behavior (pushing whatever branch you're on) for
+    // a bare `git push rad` -- it only pushes what's explicitly listed.
+    // Without a branch refspec too, that means a bare `git push rad` after
+    // committing an LFS-tracked file would silently push *only* the notes
+    // mapping, not the commit itself -- exactly the gotcha that caused a
+    // collaborator to see "no CID recorded for oid ..." even though the
+    // committer had "pushed". Configuring this explicitly, mirroring the
+    // existing `+refs/heads/*:refs/remotes/rad/*` fetch refspec above,
+    // makes a single bare `git push rad` push every local branch *and*
+    // the notes mapping together.
+    let heads_push_refspec = "+refs/heads/*:refs/heads/*".to_string();
+    ensure_refspec(workdir, &push_key, &heads_push_refspec)?;
+
     term::success!(
-        "Configured the `{RAD_REMOTE}` remote to push/fetch the `{NOTES_REF}` notes refs"
+        "Configured the `{RAD_REMOTE}` remote so a single `git push {RAD_REMOTE}` pushes your \
+         branches and the `{NOTES_REF}` notes mapping together"
     );
 
     migrate_local_notes_ref(&repo)?;
@@ -200,7 +217,7 @@ pub fn run() -> anyhow::Result<()> {
     term::blank();
     term::success!("Git LFS is now configured for this repository, backed by your local IPFS node.");
     term::info!(
-        "File CIDs are recorded in the `{NOTES_REF}` git-notes ref. Remember: after committing, `git push rad <branch>` pushes your commit but not this mapping -- run a separate bare `git push rad` too (see LFS-IPFS.md's Troubleshooting section)."
+        "File CIDs are recorded in the `{NOTES_REF}` git-notes ref, which now travels with a plain `git push {RAD_REMOTE}` / `git pull {RAD_REMOTE}` alongside your branches."
     );
 
     Ok(())

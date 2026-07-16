@@ -66,14 +66,12 @@
 > git add .gitattributes
 > ```
 >
-> Day to day — same as plain Git LFS, just remember to push **both** the branch and the
-> `refs/notes/rad-lfs` mapping (see the push gotcha below):
+> Day to day — same as plain Git LFS:
 >
 > ```sh
 > git add my-large-file.psd
 > git commit -m "Add asset"  # pre-commit hook pins it to IPFS, records the CID as a git note
-> git push rad <branch>      # pushes your commit
-> git push rad               # pushes the refs/notes/rad-lfs mapping (separate step, see below)
+> git push rad                # pushes your commit(s) and the refs/notes/rad-lfs mapping together
 > ```
 >
 > Someone else, cloning the repository for the first time:
@@ -97,12 +95,12 @@
 > git push rad                  # publish the updated wrapped keys
 > ```
 >
-> **The push gotcha, explained**: `rad lfs init` only configures a push refspec for the notes
-> ref, not the branch — so `git push rad <branch>` and bare `git push rad` each push only what
-> their own refspec covers, and you need *both* after committing an LFS-tracked file. Forgetting
-> the bare `git push rad` is the most common way to end up with "it works for me, but my
-> collaborator gets `no CID recorded for oid ...`" — their clone has your commit but not your
-> note yet.
+> **Repository set up with an older build?** A bare `git push rad` used to push *only* the
+> notes mapping, silently leaving your commit unpushed (`rad lfs init` only configured a push
+> refspec for the notes ref, not the branch). Fixed — but only for repositories where
+> `rad lfs init` has been (re-)run with this build; re-run it once (harmless, idempotent) to
+> pick up the fix on a repo set up before this. Until then, push both explicitly:
+> `git push rad <branch>` then `git push rad`.
 >
 > Full design, encryption details, and a longer troubleshooting table:
 > [`LFS-IPFS.md`](LFS-IPFS.md).
