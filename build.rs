@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|output| {
                 if output.status.success() {
-                    String::from_utf8(output.stdout).ok()
+                    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
                 } else {
                     None
                 }
@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|output| {
                 if output.status.success() {
-                    String::from_utf8(output.stdout).ok()
+                    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
                 } else {
                     None
                 }
@@ -61,6 +61,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         version
     };
 
+    // This is the `rad-lfs-ipfs` fork (Git LFS support backed by IPFS, see
+    // README.md/LFS-IPFS.md) -- append a semver build-metadata suffix (the
+    // `+...` part a `git describe`-derived version doesn't otherwise have
+    // room for) so `--version` unambiguously identifies a binary as this
+    // fork rather than upstream heartwood, e.g. when checking what a
+    // deploy target is actually running. Applies to every binary in this
+    // workspace, since they all share this build script via symlink.
+    let version = format!("{version}+lfs-ipfs");
+
     // Set a build-time `SOURCE_DATE_EPOCH` env var which includes the commit time.
     let commit_time = env::var("SOURCE_DATE_EPOCH").unwrap_or_else(|_| {
         Command::new("git")
@@ -72,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|output| {
                 if output.status.success() {
-                    String::from_utf8(output.stdout).ok()
+                    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
                 } else {
                     None
                 }
