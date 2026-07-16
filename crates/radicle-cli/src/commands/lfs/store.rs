@@ -53,6 +53,20 @@ pub fn store_object(
         .blob(pointer_text.as_bytes())
         .context("failed to write LFS pointer blob")?;
 
+    // Fast path: a note already recorded for this object (typically written
+    // moments ago by `rad lfs precommit`, or fetched from a peer) means the
+    // content is already pinned in IPFS -- nothing left to do. This matters
+    // beyond just avoiding duplicate work: `git push`'s custom-transfer-agent
+    // subprocess chain has no TTY (its stdio is consumed by the transfer
+    // protocol, not a terminal), so without this fast path, a private repo's
+    // `git push` would call back into `store_object` per file and fail
+    // outright on the passphrase prompt every time, even though the actual
+    // encryption work was already done (and the passphrase already
+    // supplied) once, interactively, at commit time.
+    if let Some(cid) = lfs_crypto::find_cids(repo, blob_oid)?.into_iter().next() {
+        return Ok(cid);
+    }
+
     ipfs::check_daemon()?;
 
     let envelope = if doc.visibility().is_public() {

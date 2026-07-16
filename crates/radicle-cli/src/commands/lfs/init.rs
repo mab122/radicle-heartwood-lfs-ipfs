@@ -82,7 +82,13 @@ const HOOK_BODY: &str = r#"rad_lfs_precommit() {
 
     staged=$(mktemp) || return 1
     batch=$(mktemp) || { rm -f "$staged"; return 1; }
-    git diff --cached --name-only --diff-filter=ACM > "$staged"
+    # `-z` avoids git's default C-style quoting of non-ASCII filenames (e.g.
+    # a literal "\305\202" for a Polish "ł") in `--name-only`'s normal
+    # output, which would otherwise not match any real file on disk and
+    # silently drop that file from LFS pinning. NUL-separated records are
+    # converted to newline-separated here for a plain `read` loop, which is
+    # safe since filenames practically never contain literal newlines.
+    git diff --cached --name-only --diff-filter=ACM -z | tr '\0' '\n' > "$staged"
 
     while IFS= read -r file; do
         [ -n "$file" ] || continue
