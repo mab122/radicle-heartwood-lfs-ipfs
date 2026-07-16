@@ -200,7 +200,7 @@ pub fn run() -> anyhow::Result<()> {
     term::blank();
     term::success!("Git LFS is now configured for this repository, backed by your local IPFS node.");
     term::info!(
-        "File CIDs are recorded in the `{NOTES_REF}` git-notes ref, which now travels with every `rad push` / `rad pull`."
+        "File CIDs are recorded in the `{NOTES_REF}` git-notes ref. Remember: after committing, `git push rad <branch>` pushes your commit but not this mapping -- run a separate bare `git push rad` too (see LFS-IPFS.md's Troubleshooting section)."
     );
 
     Ok(())

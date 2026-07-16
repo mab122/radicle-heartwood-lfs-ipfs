@@ -20,22 +20,35 @@ file-CID mapping travels with the repository itself, avoiding a single point of 
 
 ## How it works
 
-- **The mapping**: a JSON git note on `refs/notes/rad-lfs`, attached to each LFS pointer
-  file's own git blob hash (not the LFS oid — a different value), e.g. `{"v":1,"cid":"Qm..."}`
-  for a public-repo object. Verified against this repo's actual replication code
-  (`references_of` in `crates/radicle/src/storage/git.rs`) that Radicle replicates every ref
-  under a peer's namespace except `refs/tmp/heads/*` — there's no fixed allowlist, so this
-  notes ref replicates the same way `refs/heads`/`refs/tags`/`refs/cobs` do, once the
-  push/fetch refspecs below are configured.
-- **On commit**: a pre-commit hook (installed by `rad lfs init`) computes each staged
-  LFS-tracked file's oid/size and shells out to `rad lfs store`, which adds it to your local
-  IPFS daemon, pins it, and writes the note above — encrypting the content first if the
-  repository is private (see below).
-- **On push/pull**: the actual bytes move through
-  [`rad-lfs-transfer`][rad-lfs-transfer], a Git LFS custom transfer agent — see that repo for
-  details. It's a separate binary/repository since it has nothing Radicle-specific in it (no
-  identity, no keys, no encryption); it shells out to `rad lfs store`/`rad lfs fetch` for the
-  actual work.
+- **The mapping**: a JSON git note, attached to each LFS pointer file's own git blob hash (not
+  the LFS oid — a different value), e.g. `{"v":1,"cid":"Qm..."}` for a public-repo object.
+  Written locally to `refs/notes/rad-lfs/local` rather than the bare `refs/notes/rad-lfs`
+  (writing to the bare ref directly causes a git ref D/F conflict once a peer's note has been
+  fetched — see the `rad lfs init` push/fetch refspecs below); `rad lfs init`'s push refspec
+  maps that local ref to the bare `refs/notes/rad-lfs` name on the remote, which is what other
+  peers then fetch as `refs/notes/rad-lfs/<your-peer-id>`. Verified against this repo's actual
+  replication code (`references_of` in `crates/radicle/src/storage/git.rs`) that Radicle
+  replicates every ref under a peer's namespace except `refs/tmp/heads/*` — there's no fixed
+  allowlist, so these notes refs replicate the same way `refs/heads`/`refs/tags`/`refs/cobs` do,
+  once the push/fetch refspecs below are configured.
+- **On commit**: a pre-commit hook (installed by `rad lfs init`) computes every staged
+  LFS-tracked file's oid/size and passes them all to a single `rad lfs precommit` call, which
+  adds each one to your local IPFS daemon, pins it, and writes the note above — encrypting the
+  content first if the repository is private (see below). Batched into one call (rather than one
+  `rad lfs store` call per file) specifically so a private repo's passphrase is only prompted
+  for once per commit, not once per file.
+- **On push**: committing writes the note locally, but pushing it to the remote is a **separate
+  step** from pushing your commit — `rad lfs init` only configures a push refspec for the notes
+  ref, not the branch, so after committing you need both `git push rad <branch>` (your commit)
+  and a bare `git push rad` (the notes mapping). See [Troubleshooting](#troubleshooting) below;
+  this is the single most common way to end up with content that looks committed but that a
+  collaborator can't fetch.
+- **The actual bytes** move through [`rad-lfs-transfer`][rad-lfs-transfer], a Git LFS custom
+  transfer agent invoked automatically by `git`/`git-lfs` during a push or checkout — see that
+  repo for details. It's a separate binary/repository since it has nothing Radicle-specific in
+  it (no identity, no keys, no encryption); it shells out to `rad lfs store`/`rad lfs fetch` for
+  the actual work, which is a no-op re-upload if the object already has a note (e.g. one your
+  own pre-commit hook already wrote).
 - **Seeding**: `rad seed` now also pins a repository's known LFS objects in your local IPFS
   node (mirroring "seeding = keep a full copy"); `rad unseed` unpins them. Known prototype
   limitation: no cross-repository pin refcounting, so unseeding one repository can unpin
@@ -178,7 +191,8 @@ git lfs track "*.psd"          # or whatever large-file patterns you need
 git add .gitattributes
 git add my-large-file.psd
 git commit -m "Add asset"      # pre-commit hook pins it to IPFS and records the CID here
-rad push                       # pushes the commit and the refs/notes/rad-lfs mapping together
+git push rad <branch>          # pushes your commit
+git push rad                   # pushes the refs/notes/rad-lfs mapping (separate step -- see the push gotcha below)
 ```
 
 Someone else cloning the same repository:
