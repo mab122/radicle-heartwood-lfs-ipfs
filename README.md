@@ -55,6 +55,57 @@
 > **Nothing above requires IPFS**; Git LFS support specifically needs a running `ipfs daemon`,
 > and `rad lfs init` will tell you plainly if one isn't reachable rather than failing confusingly
 > later.
+>
+> ### Quickstart cheatsheet
+>
+> One-time, per repository (with `ipfs daemon` already running in the background):
+>
+> ```sh
+> rad lfs init
+> git lfs track "*.psd"      # or whatever large-file patterns you need
+> git add .gitattributes
+> ```
+>
+> Day to day — same as plain Git LFS, just remember to push **both** the branch and the
+> `refs/notes/rad-lfs` mapping (see the push gotcha below):
+>
+> ```sh
+> git add my-large-file.psd
+> git commit -m "Add asset"  # pre-commit hook pins it to IPFS, records the CID as a git note
+> git push rad <branch>      # pushes your commit
+> git push rad               # pushes the refs/notes/rad-lfs mapping (separate step, see below)
+> ```
+>
+> Someone else, cloning the repository for the first time:
+>
+> ```sh
+> rad clone rad:<repo-id>
+> cd <repo>
+> rad lfs init                # one-time, needs their own ipfs daemon running
+> git lfs pull                 # fetches large files via IPFS instead of git
+> ```
+>
+> **Private repository?** You'll just be prompted for your keystore passphrase on `commit`/
+> `push`/`pull` when needed (ssh-agent alone can't do the key-agreement encryption requires —
+> see [`LFS-IPFS.md`](LFS-IPFS.md#encryption-for-private-repositories)). After granting a new
+> collaborator access, have an *already-authorized* collaborator run `rad lfs rekey` and push,
+> so the newcomer can decrypt files committed before they were added:
+>
+> ```sh
+> rad id update --allow <did>   # or add them as a delegate
+> rad lfs rekey                 # run by someone already authorized
+> git push rad                  # publish the updated wrapped keys
+> ```
+>
+> **The push gotcha, explained**: `rad lfs init` only configures a push refspec for the notes
+> ref, not the branch — so `git push rad <branch>` and bare `git push rad` each push only what
+> their own refspec covers, and you need *both* after committing an LFS-tracked file. Forgetting
+> the bare `git push rad` is the most common way to end up with "it works for me, but my
+> collaborator gets `no CID recorded for oid ...`" — their clone has your commit but not your
+> note yet.
+>
+> Full design, encryption details, and a longer troubleshooting table:
+> [`LFS-IPFS.md`](LFS-IPFS.md).
 
 ---
 
