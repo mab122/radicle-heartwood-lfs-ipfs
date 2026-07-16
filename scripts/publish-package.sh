@@ -50,6 +50,39 @@ if [ ! -f "$repo_root/radicle-lfs-transfer/Cargo.toml" ]; then
     exit 1
 fi
 
+existing_versions="$(curl -sS "https://${FORGEJO_HOST}/api/v1/packages/${FORGEJO_OWNER}?type=generic" \
+    -H "Authorization: token ${token}" \
+    | grep -o "\"name\":\"${PACKAGE_NAME}\",\"version\":\"[^\"]*\"" \
+    | sed -E 's/.*"version":"([^"]*)"/\1/' || true)"
+
+if printf '%s\n' "$existing_versions" | grep -qx "$version"; then
+    echo "==> $PACKAGE_NAME $version is already published:" \
+         "https://${FORGEJO_HOST}/${FORGEJO_OWNER}/-/packages/generic/${PACKAGE_NAME}/${version}"
+    exit 0
+fi
+
+# Changelog since whichever previously-published version's commit we can
+# find (a `git describe`-style version ends in "g<short-sha>"). Falls back
+# to the full log if there's no previous package, or its version string
+# doesn't parse -- better a long changelog than a failed release.
+prev_sha=""
+if [ -n "$existing_versions" ]; then
+    prev_sha="$(printf '%s\n' "$existing_versions" \
+        | grep -oE 'g[0-9a-f]{7,40}$' \
+        | sed 's/^g//' \
+        | head -1)"
+fi
+if [ -n "$prev_sha" ] && git cat-file -e "$prev_sha" 2>/dev/null; then
+    changelog_range="${prev_sha}..HEAD"
+else
+    prev_sha=""
+    changelog_range="HEAD"
+fi
+changelog="$(git log --oneline "$changelog_range")"
+if [ -z "$changelog" ]; then
+    changelog="(no commits since the previously published version)"
+fi
+
 echo "==> Building release binaries (version: $version)"
 cargo build --release --locked -p radicle-cli --bin rad
 cargo build --release --locked -p radicle-node
@@ -83,7 +116,12 @@ contents:
   radicle-node        $(target/release/radicle-node --version)
   git-remote-rad       $(target/release/git-remote-rad --version)
   rad-lfs-transfer     (no --version; speaks git-lfs custom-transfer protocol on stdin/stdout)
+
+changelog (since ${prev_sha:-the beginning}):
+$changelog
 EOF
+
+printf 'Changes since %s:\n\n%s\n' "${prev_sha:-the beginning}" "$changelog" > "$staging/CHANGELOG.txt"
 
 archive_name="${PACKAGE_NAME}-${version}-${target_triple}.tar.gz"
 archive_path="$staging/../${archive_name}"
@@ -120,5 +158,6 @@ upload() {
 echo "==> Uploading to https://${FORGEJO_HOST}/${FORGEJO_OWNER}/-/packages/generic/${PACKAGE_NAME}/${version}"
 upload "$archive_path" "$archive_name"
 upload "${archive_path}.sha256" "${archive_name}.sha256"
+upload "$staging/CHANGELOG.txt" "CHANGELOG.txt"
 
 echo "==> Done: https://${FORGEJO_HOST}/${FORGEJO_OWNER}/-/packages/generic/${PACKAGE_NAME}/${version}"
