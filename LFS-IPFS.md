@@ -53,9 +53,16 @@ file-CID mapping travels with the repository itself, avoiding a single point of 
   the actual work, which is a no-op re-upload if the object already has a note (e.g. one your
   own pre-commit hook already wrote).
 - **Seeding**: `rad seed` now also pins a repository's known LFS objects in your local IPFS
-  node (mirroring "seeding = keep a full copy"); `rad unseed` unpins them. Known prototype
-  limitation: no cross-repository pin refcounting, so unseeding one repository can unpin
-  content still needed by another seeded repository that happens to share the same CID.
+  node (mirroring "seeding = keep a full copy"); `rad unseed` unpins them, except any CID also
+  referenced by another currently-seeded repository's own LFS notes (e.g. two repositories that
+  happen to track byte-identical content, which hashes to the same CID) -- unpinning those would
+  silently break the other repository. There's no persistent pin refcount kept anywhere; this is
+  recomputed from every other seeded repository's notes each time `rad unseed` runs.
+- **Recovering from a skipped pin**: if the pre-commit hook didn't run (`git commit --no-verify`)
+  or soft-skipped because `ipfs`/`rad` weren't on `PATH` yet, a file can end up committed as a
+  valid LFS pointer with no corresponding note -- nothing pins it anywhere. Run `rad lfs
+  backfill` to retroactively pin every LFS-tracked file at HEAD that's missing one, using
+  content from Git LFS's own local object cache (or the working-tree file, as a fallback).
 
 ## Encryption for private repositories
 
@@ -236,7 +243,8 @@ previously-committed LFS objects too, not just ones committed after they were ad
 | `Git LFS is not installed (the 'git-lfs' binary was not found on your PATH)` | Install [Git LFS](https://git-lfs.com). |
 | `no IPFS (Kubo) daemon reachable at ...` | Start one: `ipfs daemon` (see [Run](#run) above). |
 | `rad-lfs-transfer: command not found` during `git lfs push`/`pull` | `cargo install --path radicle-lfs-transfer` didn't complete, or `~/.radicle/bin` isn't on `PATH`. |
-| Large file didn't get pinned (commit went through, but no `rad-lfs` note) | The pre-commit hook silently skips pinning if the `ipfs`/`rad` CLIs aren't on `PATH` — check `command -v ipfs` / `command -v rad`. Re-add the file and commit again once available. |
+| Large file didn't get pinned (commit went through, but no `rad-lfs` note) | The pre-commit hook silently skips pinning if the `ipfs`/`rad` CLIs aren't on `PATH` — check `command -v ipfs` / `command -v rad`. Once available, run `rad lfs backfill` to pin it retroactively rather than needing to re-commit. |
+| Committed with `git commit --no-verify` (or the pre-commit hook was skipped some other way) and now nothing's pinned | Run `rad lfs backfill` — it walks every LFS-tracked file at HEAD and pins whichever ones are missing a note, without needing a new commit. |
 | `private-repo LFS operations need to perform a key-agreement (ECDH) operation ...` | Your keystore is encrypted, ssh-agent can't do key agreement (protocol limitation), and no passphrase is available — normally you'd just be prompted interactively; this only happens in a non-interactive context (no TTY, e.g. CI). Set `RAD_PASSPHRASE`, or use an unencrypted keystore, or run it from a terminal. |
 | `you are not an authorized recipient of this object` | Either genuinely unauthorized (not a delegate/allow-listed DID for this private repo), or authorized *after* this specific object was committed and nobody has run `rad lfs rekey` since — ask an already-authorized collaborator to run it and push. |
 | `fatal: couldn't find remote ref refs/notes/rad-lfs` on `git fetch`/`git pull` (breaks *all* fetching, not just LFS) | Fixed — but if this repo had `rad lfs init` run against an older build, re-run `rad lfs init` once to replace the stale, now-invalid fetch refspec it configured (see `NOTES-lfs-notes-fetch-bug.md` for the full story). |

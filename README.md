@@ -48,10 +48,12 @@
 > ```
 >
 > From here, use `rad` exactly as upstream describes below (`rad auth`, `rad init`, etc). The
-> only new commands are `rad lfs init` (run once per repository you want large-file support in)
-> and `rad lfs rekey` (run after granting a new collaborator access to a **private** repository,
-> so they can decrypt previously-committed LFS objects too) — see [`LFS-IPFS.md`](LFS-IPFS.md)
-> for that workflow and how private-repo content gets encrypted before it reaches IPFS.
+> only new commands are `rad lfs init` (run once per repository you want large-file support in),
+> `rad lfs rekey` (run after granting a new collaborator access to a **private** repository, so
+> they can decrypt previously-committed LFS objects too), and `rad lfs backfill` (retroactively
+> pins any LFS-tracked file that got committed without going through the pre-commit hook, e.g.
+> `--no-verify`) — see [`LFS-IPFS.md`](LFS-IPFS.md) for those workflows and how private-repo
+> content gets encrypted before it reaches IPFS.
 > **Nothing above requires IPFS**; Git LFS support specifically needs a running `ipfs daemon`,
 > and `rad lfs init` will tell you plainly if one isn't reachable rather than failing confusingly
 > later.
