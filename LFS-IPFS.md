@@ -49,9 +49,13 @@ file-CID mapping travels with the repository itself, avoiding a single point of 
 - **The actual bytes** move through [`rad-lfs-transfer`][rad-lfs-transfer], a Git LFS custom
   transfer agent invoked automatically by `git`/`git-lfs` during a push or checkout — see that
   repo for details. It's a separate binary/repository since it has nothing Radicle-specific in
-  it (no identity, no keys, no encryption); it shells out to `rad lfs store`/`rad lfs fetch` for
-  the actual work, which is a no-op re-upload if the object already has a note (e.g. one your
-  own pre-commit hook already wrote).
+  it (no identity, no keys, no encryption). Uploads shell out to `rad lfs store` per object
+  (a no-op re-upload if the object already has a note, e.g. one your own pre-commit hook already
+  wrote). Downloads go through `rad lfs fetch-batch` instead of `rad lfs fetch` directly: since
+  git-lfs's custom-transfer protocol requests objects one at a time rather than all upfront,
+  `rad-lfs-transfer` spawns `fetch-batch` once per `git lfs pull`/checkout session and keeps it
+  alive for every object in that session, so a private repo's passphrase is prompted for once
+  per session rather than once per file.
 - **Seeding**: `rad seed` now also pins a repository's known LFS objects in your local IPFS
   node (mirroring "seeding = keep a full copy"); `rad unseed` unpins them, except any CID also
   referenced by another currently-seeded repository's own LFS notes (e.g. two repositories that
