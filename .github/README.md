@@ -1,5 +1,16 @@
 # ❤️🪵
 
+> ## Fork: Git LFS support, backed by IPFS
+>
+> This is a fork of upstream [`radicle-dev/heartwood`](https://github.com/radicle-dev/heartwood)
+> adding Git LFS (large file) support, with large file content stored on each contributor's own
+> local IPFS node rather than a central server. Everything below is upstream's own text,
+> unchanged, and describes upstream `heartwood` in general, not this fork specifically.
+>
+> This repository is developed on a self-hosted Forgejo instance, not GitHub — see
+> [the main `README.md`](../README.md) for the fork's own quickstart, and
+> [`LFS-IPFS.md`](../LFS-IPFS.md) for the full design, encryption details, and troubleshooting.
+
 *Radicle Heartwood Protocol & Stack*
 
 Heartwood is the third iteration of the Radicle Protocol, a powerful
