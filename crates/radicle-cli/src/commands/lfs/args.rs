@@ -55,4 +55,10 @@ pub enum Command {
     /// without going through the pre-commit hook (e.g. `--no-verify`, or
     /// the IPFS daemon/`ipfs`/`rad` weren't available at commit time)
     Backfill,
+    /// Long-lived worker that fetches many LFS objects across one process
+    /// (invoked by the custom transfer agent; not for interactive use).
+    /// Reads "<oid> <size> <out-path>" lines from stdin, one at a time,
+    /// writing a JSON response line for each.
+    #[command(hide = true)]
+    FetchBatch,
 }

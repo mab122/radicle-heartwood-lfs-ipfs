@@ -2,6 +2,7 @@
 
 pub mod backfill;
 pub mod fetch;
+pub mod fetch_batch;
 pub mod init;
 pub mod precommit;
 pub mod rekey;
@@ -22,5 +23,6 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         Command::Rekey => self::rekey::run(ctx),
         Command::Precommit => self::precommit::run(ctx),
         Command::Backfill => self::backfill::run(ctx),
+        Command::FetchBatch => self::fetch_batch::run(ctx),
     }
 }
