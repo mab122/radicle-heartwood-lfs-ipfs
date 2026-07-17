@@ -1,5 +1,6 @@
 //! `rad lfs` command implementation.
 
+pub mod backfill;
 pub mod fetch;
 pub mod init;
 pub mod precommit;
@@ -20,5 +21,6 @@ pub fn run(args: Args, ctx: impl term::Context) -> anyhow::Result<()> {
         Command::Fetch { oid, size, out } => self::fetch::run(oid, size, out, ctx),
         Command::Rekey => self::rekey::run(ctx),
         Command::Precommit => self::precommit::run(ctx),
+        Command::Backfill => self::backfill::run(ctx),
     }
 }

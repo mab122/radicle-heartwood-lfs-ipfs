@@ -51,4 +51,8 @@ pub enum Command {
     /// "<oid> <size> <path>" lines from stdin.
     #[command(hide = true)]
     Precommit,
+    /// Retroactively pin any LFS-tracked file at HEAD that was committed
+    /// without going through the pre-commit hook (e.g. `--no-verify`, or
+    /// the IPFS daemon/`ipfs`/`rad` weren't available at commit time)
+    Backfill,
 }
