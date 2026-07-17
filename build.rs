@@ -2,6 +2,19 @@ use std::env;
 use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Without this, cargo has no way to know it needs to re-run this
+    // script just because the current commit changed -- by default it
+    // only reruns a build script when a file inside the crate's own
+    // source tree changes, and `.git` is outside that entirely. That
+    // silently let GIT_HEAD/RADICLE_VERSION go stale on ordinary
+    // incremental rebuilds across commits that didn't happen to touch
+    // this crate's own sources (discovered live: several `cargo build`s
+    // in a row kept reporting an old commit's version despite the
+    // working tree being clean at a newer commit). `.git/logs/HEAD` (the
+    // reflog) is touched on every commit/checkout/merge, unlike
+    // `.git/HEAD` itself, which only changes when you switch branches.
+    println!("cargo::rerun-if-changed=../../.git/logs/HEAD");
+
     // Set a build-time `GIT_HEAD` env var which includes the commit id;
     // such that we can tell which code is running.
     let hash = env::var("GIT_HEAD").unwrap_or_else(|_| {
