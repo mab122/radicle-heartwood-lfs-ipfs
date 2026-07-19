@@ -30,6 +30,14 @@ pub use crate::lfs_crypto::NOTES_REF as LFS_NOTES_REF;
 /// Default HTTP API address of a local Kubo (IPFS) daemon.
 const DEFAULT_KUBO_API_URL: &str = "http://127.0.0.1:5001";
 
+/// Cap on how large an LFS object's content we'll read back from IPFS in
+/// one go. `ureq`'s `Body::read_to_vec()` otherwise defaults to a 10MB
+/// limit meant for typical HTTP API responses, which is far too small for
+/// LFS content (that's the whole point of storing it out-of-band). 1GiB
+/// comfortably covers any file worth tracking in this repo; raise if a
+/// larger LFS object legitimately needs to be fetched.
+const MAX_CAT_RESPONSE_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Returns the Kubo HTTP API base URL, respecting the `KUBO_API_URL`
 /// environment variable if set.
 pub(crate) fn kubo_api_url() -> String {
@@ -134,6 +142,8 @@ pub fn cat(cid: &str) -> anyhow::Result<Vec<u8>> {
 
     response
         .body_mut()
+        .with_config()
+        .limit(MAX_CAT_RESPONSE_BYTES)
         .read_to_vec()
         .map_err(|err| anyhow!("failed to read IPFS `cat` response for {cid}: {err}"))
 }
@@ -206,5 +216,31 @@ pub fn unpin_all(cids: &[String]) {
                 term::warning(format!("Failed to unpin LFS object {cid} in IPFS: {err}"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the `cat()` response being truncated at
+    /// `ureq`'s default 10MB read limit for any LFS object larger than
+    /// that (e.g. the ~29MB `assets/posts/hashcash/thumbnail.xcf` in the
+    /// blog repo failed to smudge with exactly this error before the
+    /// `MAX_CAT_RESPONSE_BYTES` fix). Requires a local Kubo daemon, so
+    /// it's `#[ignore]`d by default: `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "requires a local IPFS (Kubo) daemon at 127.0.0.1:5001"]
+    fn cat_round_trips_content_larger_than_ureqs_default_10mb_limit() {
+        check_daemon().expect("local Kubo daemon must be reachable for this test");
+
+        let bytes = vec![0x42u8; 15 * 1024 * 1024]; // 15MB, past the old 10MB cap
+        let cid = add(&bytes).expect("add should succeed");
+        let fetched = cat(&cid).expect("cat should succeed for content past the old 10MB cap");
+
+        assert_eq!(fetched.len(), bytes.len());
+        assert_eq!(fetched, bytes);
+
+        unpin_all(std::slice::from_ref(&cid));
     }
 }
